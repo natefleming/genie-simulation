@@ -5,20 +5,26 @@ description = "Tools for exporting Genie conversations and load testing Genie ch
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "dao-ai @ git+https://github.com/natefleming/dao-ai.git",
     "databricks-ai-bridge>=0.6.0",
     "databricks-sdk>=0.81.0",
     "locust>=2.29.0",
     "loguru>=0.7.0",
+    "python-dotenv>=1.0.0",
     "pyyaml>=6.0",
 ]
 
 [project.scripts]
 export-conversations = "genie_simulation.export_conversations:main"
 genie-loadtest = "genie_simulation.loadtest:main"
+genie-loadtest-cached = "genie_simulation.loadtest_cached:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.uv]
 package = true

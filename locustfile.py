@@ -31,8 +31,12 @@ from typing import Any
 import yaml
 from databricks.sdk import WorkspaceClient
 from databricks_ai_bridge.genie import Genie, GenieResponse
+from dotenv import load_dotenv
 from locust import User, between, events, task
 from loguru import logger
+
+# Load environment variables from .env file if present
+load_dotenv()
 
 # Configure loguru for stdout only
 logger.remove()
