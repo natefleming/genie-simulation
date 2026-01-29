@@ -38,6 +38,7 @@ dbutils.library.restartPython()
 
 # COMMAND ----------
 
+dbutils.widgets.text("conversations_file", "../conversations.yaml", "Conversations File Path")
 dbutils.widgets.text("user_count", "10", "Number of Concurrent Users")
 dbutils.widgets.text("spawn_rate", "2", "User Spawn Rate (per second)")
 dbutils.widgets.text("run_time", "5m", "Test Duration (e.g., 5m, 300s)")
@@ -68,10 +69,18 @@ load_config("../.env")
 # Create config from environment
 config = LoadTestConfig.from_env()
 
-print("\nConfiguration loaded from .env:")
+# Use widget value if changed from default, otherwise use .env value
+widget_conversations_file = dbutils.widgets.get("conversations_file")
+conversations_file = (
+    widget_conversations_file 
+    if widget_conversations_file != "../conversations.yaml" 
+    else config.conversations_file
+)
+
+print("\nConfiguration:")
 print("-" * 50)
 print(f"Space ID: {config.space_id}")
-print(f"Conversations File: {config.conversations_file}")
+print(f"Conversations File: {conversations_file}")
 print(f"Wait Time: {config.min_wait}s - {config.max_wait}s")
 if config.sample_size:
     print(f"Sample Size: {config.sample_size}")
@@ -89,7 +98,7 @@ print("-" * 50)
 from genie_simulation.notebook_runner import run_load_test
 
 results = run_load_test(
-    conversations_file=config.conversations_file,
+    conversations_file=conversations_file,
     space_id=config.space_id,
     user_count=user_count,
     spawn_rate=spawn_rate,

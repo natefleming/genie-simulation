@@ -40,6 +40,7 @@ dbutils.library.restartPython()
 
 # COMMAND ----------
 
+dbutils.widgets.text("conversations_file", "../conversations.yaml", "Conversations File Path")
 dbutils.widgets.text("user_count", "10", "Number of Concurrent Users")
 dbutils.widgets.text("spawn_rate", "2", "User Spawn Rate (per second)")
 dbutils.widgets.text("run_time", "5m", "Test Duration (e.g., 5m, 300s)")
@@ -71,12 +72,20 @@ load_config("../.env")
 config = LoadTestConfig.from_env()
 cache_config = CacheConfig.from_env(dbutils=dbutils, secret_scope="genie-loadtest")
 
-print("\nConfiguration loaded from .env:")
+# Use widget value if changed from default, otherwise use .env value
+widget_conversations_file = dbutils.widgets.get("conversations_file")
+conversations_file = (
+    widget_conversations_file 
+    if widget_conversations_file != "../conversations.yaml" 
+    else config.conversations_file
+)
+
+print("\nConfiguration:")
 print("=" * 60)
 print("\nGeneral Settings:")
 print("-" * 60)
 print(f"Space ID: {config.space_id}")
-print(f"Conversations File: {config.conversations_file}")
+print(f"Conversations File: {conversations_file}")
 print(f"Wait Time: {config.min_wait}s - {config.max_wait}s")
 if config.sample_size:
     print(f"Sample Size: {config.sample_size}")
@@ -102,7 +111,7 @@ print("=" * 60)
 from genie_simulation.notebook_runner import run_cached_load_test
 
 results = run_cached_load_test(
-    conversations_file=config.conversations_file,
+    conversations_file=conversations_file,
     space_id=config.space_id,
     lakebase_client_id=cache_config.client_id,
     lakebase_client_secret=cache_config.client_secret,
