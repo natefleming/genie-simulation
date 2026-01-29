@@ -7,12 +7,19 @@ from genie_simulation.config import (
     load_config,
     LoadTestConfig,
 )
-
-# Note: notebook_runner imports gevent which requires early monkey-patching.
-# Import directly when needed: from genie_simulation.notebook_runner import GenieLoadTestRunner
+from genie_simulation.notebook_runner import (
+    cleanup_csv_files,
+    LoadTestResults,
+    run_cached_load_test,
+    run_load_test,
+)
 
 __all__ = [
     "CacheConfig",
+    "cleanup_csv_files",
     "load_config",
     "LoadTestConfig",
+    "LoadTestResults",
+    "run_cached_load_test",
+    "run_load_test",
 ]

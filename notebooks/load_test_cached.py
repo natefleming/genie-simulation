@@ -42,18 +42,18 @@ dbutils.library.restartPython()
 
 dbutils.widgets.text("user_count", "10", "Number of Concurrent Users")
 dbutils.widgets.text("spawn_rate", "2", "User Spawn Rate (per second)")
-dbutils.widgets.text("run_time_seconds", "300", "Test Duration (seconds)")
+dbutils.widgets.text("run_time", "5m", "Test Duration (e.g., 5m, 300s)")
 
 # COMMAND ----------
 
 user_count = int(dbutils.widgets.get("user_count"))
-spawn_rate = float(dbutils.widgets.get("spawn_rate"))
-run_time_seconds = int(dbutils.widgets.get("run_time_seconds"))
+spawn_rate = int(dbutils.widgets.get("spawn_rate"))
+run_time = dbutils.widgets.get("run_time")
 
 print(f"Runtime Parameters:")
 print(f"  Users: {user_count}")
 print(f"  Spawn Rate: {spawn_rate}/s")
-print(f"  Duration: {run_time_seconds}s")
+print(f"  Duration: {run_time}")
 
 # COMMAND ----------
 
@@ -99,37 +99,28 @@ print("=" * 60)
 
 # COMMAND ----------
 
-from genie_simulation.notebook_runner import GenieLoadTestRunner
+from genie_simulation.notebook_runner import run_cached_load_test
 
-runner = GenieLoadTestRunner(
+results = run_cached_load_test(
     conversations_file=config.conversations_file,
     space_id=config.space_id,
-    min_wait=config.min_wait,
-    max_wait=config.max_wait,
-    sample_size=config.sample_size,
-    sample_seed=config.sample_seed,
-    # Cache settings
     lakebase_client_id=cache_config.client_id,
     lakebase_client_secret=cache_config.client_secret,
     lakebase_instance=cache_config.lakebase_instance,
     warehouse_id=cache_config.warehouse_id,
+    user_count=user_count,
+    spawn_rate=spawn_rate,
+    run_time=run_time,
+    min_wait=config.min_wait,
+    max_wait=config.max_wait,
+    sample_size=config.sample_size,
+    sample_seed=config.sample_seed,
     cache_ttl=cache_config.cache_ttl,
     similarity_threshold=cache_config.similarity_threshold,
     lru_capacity=cache_config.lru_capacity,
+    csv_prefix="genie_cached_loadtest",
+    verbose=True,
 )
-
-print(f"Starting cached load test with {user_count} users for {run_time_seconds}s...")
-
-# COMMAND ----------
-
-results = runner.run(
-    user_count=user_count,
-    spawn_rate=spawn_rate,
-    run_time_seconds=run_time_seconds,
-    use_cache=True,
-)
-
-print("Cached load test completed!")
 
 # COMMAND ----------
 
@@ -139,41 +130,78 @@ print("Cached load test completed!")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Summary
+# MAGIC ### Summary Statistics
+# MAGIC 
+# MAGIC Look for request types:
+# MAGIC - **GENIE_LRU_HIT**: Served from LRU cache (fastest)
+# MAGIC - **GENIE_SEMANTIC_HIT**: Served from semantic cache
+# MAGIC - **GENIE_LIVE**: Cache miss, fetched from Genie API
 
 # COMMAND ----------
 
-display(results.summary_df)
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ### Cache Metrics
-
-# COMMAND ----------
-
-if results.cache_metrics_df is not None:
-    display(results.cache_metrics_df)
+if not results.stats_df.empty:
+    display(results.stats_df)
 else:
-    print("Cache metrics not available")
+    print("No stats available")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Latency Percentiles
+# MAGIC ### Failures
 
 # COMMAND ----------
 
-display(results.percentiles_df)
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ### Per-Endpoint Breakdown
-
-# COMMAND ----------
-
-if not results.endpoints_df.empty:
-    display(results.endpoints_df)
+if not results.failures_df.empty:
+    display(results.failures_df)
 else:
-    print("No endpoint data available")
+    print("No failures recorded")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Exceptions
+
+# COMMAND ----------
+
+if not results.exceptions_df.empty:
+    display(results.exceptions_df)
+else:
+    print("No exceptions recorded")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Response Time History
+
+# COMMAND ----------
+
+if not results.stats_history_df.empty:
+    display(results.stats_history_df.tail(20))
+else:
+    print("No history available")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Clean Up
+
+# COMMAND ----------
+
+from genie_simulation.notebook_runner import cleanup_csv_files
+
+cleanup_csv_files("genie_cached_loadtest")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Comparing Results
+# MAGIC 
+# MAGIC To compare cached vs non-cached performance:
+# MAGIC 
+# MAGIC 1. Run the **load_test** notebook (without caching) to get baseline metrics
+# MAGIC 2. Run this **load_test_cached** notebook with the same settings
+# MAGIC 3. Compare:
+# MAGIC    - Average latency reduction
+# MAGIC    - P90/P95 latency improvement  
+# MAGIC    - Cache hit rates (higher is better)
+# MAGIC    - Throughput improvement

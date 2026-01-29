@@ -40,18 +40,18 @@ dbutils.library.restartPython()
 
 dbutils.widgets.text("user_count", "10", "Number of Concurrent Users")
 dbutils.widgets.text("spawn_rate", "2", "User Spawn Rate (per second)")
-dbutils.widgets.text("run_time_seconds", "300", "Test Duration (seconds)")
+dbutils.widgets.text("run_time", "5m", "Test Duration (e.g., 5m, 300s)")
 
 # COMMAND ----------
 
 user_count = int(dbutils.widgets.get("user_count"))
-spawn_rate = float(dbutils.widgets.get("spawn_rate"))
-run_time_seconds = int(dbutils.widgets.get("run_time_seconds"))
+spawn_rate = int(dbutils.widgets.get("spawn_rate"))
+run_time = dbutils.widgets.get("run_time")
 
 print(f"Runtime Parameters:")
 print(f"  Users: {user_count}")
 print(f"  Spawn Rate: {spawn_rate}/s")
-print(f"  Duration: {run_time_seconds}s")
+print(f"  Duration: {run_time}")
 
 # COMMAND ----------
 
@@ -86,29 +86,21 @@ print("-" * 50)
 
 # COMMAND ----------
 
-from genie_simulation.notebook_runner import GenieLoadTestRunner
+from genie_simulation.notebook_runner import run_load_test
 
-runner = GenieLoadTestRunner(
+results = run_load_test(
     conversations_file=config.conversations_file,
     space_id=config.space_id,
+    user_count=user_count,
+    spawn_rate=spawn_rate,
+    run_time=run_time,
     min_wait=config.min_wait,
     max_wait=config.max_wait,
     sample_size=config.sample_size,
     sample_seed=config.sample_seed,
+    csv_prefix="genie_loadtest",
+    verbose=True,
 )
-
-print(f"Starting load test with {user_count} users for {run_time_seconds}s...")
-
-# COMMAND ----------
-
-results = runner.run(
-    user_count=user_count,
-    spawn_rate=spawn_rate,
-    run_time_seconds=run_time_seconds,
-    use_cache=False,
-)
-
-print("Load test completed!")
 
 # COMMAND ----------
 
@@ -118,29 +110,59 @@ print("Load test completed!")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ### Summary
+# MAGIC ### Summary Statistics
 
 # COMMAND ----------
 
-display(results.summary_df)
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ### Latency Percentiles
-
-# COMMAND ----------
-
-display(results.percentiles_df)
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ### Per-Endpoint Breakdown
-
-# COMMAND ----------
-
-if not results.endpoints_df.empty:
-    display(results.endpoints_df)
+if not results.stats_df.empty:
+    display(results.stats_df)
 else:
-    print("No endpoint data available")
+    print("No stats available")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Failures
+
+# COMMAND ----------
+
+if not results.failures_df.empty:
+    display(results.failures_df)
+else:
+    print("No failures recorded")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Exceptions
+
+# COMMAND ----------
+
+if not results.exceptions_df.empty:
+    display(results.exceptions_df)
+else:
+    print("No exceptions recorded")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ### Response Time History
+
+# COMMAND ----------
+
+if not results.stats_history_df.empty:
+    # Show last few rows of history
+    display(results.stats_history_df.tail(20))
+else:
+    print("No history available")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Clean Up
+
+# COMMAND ----------
+
+from genie_simulation.notebook_runner import cleanup_csv_files
+
+cleanup_csv_files("genie_loadtest")
