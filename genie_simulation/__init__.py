@@ -4,9 +4,8 @@ __version__ = "0.1.0"
 
 from genie_simulation.config import (
     CacheConfig,
+    load_config,
     LoadTestConfig,
-    download_workspace_file,
-    get_notebook_directory,
 )
 from genie_simulation.notebook_runner import (
     CacheMetrics,
@@ -18,8 +17,7 @@ __all__ = [
     "CacheConfig",
     "CacheMetrics",
     "GenieLoadTestRunner",
+    "load_config",
     "LoadTestConfig",
     "LoadTestResults",
-    "download_workspace_file",
-    "get_notebook_directory",
 ]
