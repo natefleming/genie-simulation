@@ -108,7 +108,13 @@ print("=" * 60)
 
 # COMMAND ----------
 
+from databricks.sdk import WorkspaceClient
 from genie_simulation.notebook_runner import run_cached_load_test
+
+# Get auth credentials from notebook context to pass to subprocess
+client = WorkspaceClient()
+databricks_host = client.config.host
+databricks_token = client.config.token
 
 results = run_cached_load_test(
     conversations_file=conversations_file,
@@ -129,6 +135,8 @@ results = run_cached_load_test(
     lru_capacity=cache_config.lru_capacity,
     csv_prefix="genie_cached_loadtest",
     verbose=True,
+    databricks_host=databricks_host,
+    databricks_token=databricks_token,
 )
 
 # COMMAND ----------

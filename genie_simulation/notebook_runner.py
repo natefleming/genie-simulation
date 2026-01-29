@@ -78,6 +78,8 @@ def run_load_test(
     csv_prefix: str = "genie_loadtest",
     locustfile: str | None = None,
     verbose: bool = True,
+    databricks_host: str | None = None,
+    databricks_token: str | None = None,
 ) -> LoadTestResults:
     """
     Run a Genie load test using Locust via subprocess.
@@ -95,6 +97,8 @@ def run_load_test(
         csv_prefix: Prefix for output CSV files
         locustfile: Path to the locustfile (default: genie_locustfile.py in same dir)
         verbose: If True, print Locust output in real-time
+        databricks_host: Databricks workspace URL (for subprocess auth)
+        databricks_token: Databricks auth token (for subprocess auth)
     
     Returns:
         LoadTestResults containing DataFrames with test metrics
@@ -125,6 +129,12 @@ def run_load_test(
         env["GENIE_SAMPLE_SIZE"] = str(sample_size)
     if sample_seed is not None:
         env["GENIE_SAMPLE_SEED"] = str(sample_seed)
+    
+    # Pass Databricks credentials for subprocess authentication
+    if databricks_host:
+        env["DATABRICKS_HOST"] = databricks_host
+    if databricks_token:
+        env["DATABRICKS_TOKEN"] = databricks_token
     
     # Build locust command
     cmd = (
@@ -233,6 +243,8 @@ def run_cached_load_test(
     csv_prefix: str = "genie_cached_loadtest",
     locustfile: str | None = None,
     verbose: bool = True,
+    databricks_host: str | None = None,
+    databricks_token: str | None = None,
 ) -> LoadTestResults:
     """
     Run a cached Genie load test using Locust via subprocess.
@@ -257,6 +269,8 @@ def run_cached_load_test(
         csv_prefix: Prefix for output CSV files
         locustfile: Path to the locustfile (default: genie_locustfile_cached.py)
         verbose: If True, print Locust output in real-time
+        databricks_host: Databricks workspace URL (for subprocess auth)
+        databricks_token: Databricks auth token (for subprocess auth)
     
     Returns:
         LoadTestResults containing DataFrames with test metrics
@@ -293,6 +307,12 @@ def run_cached_load_test(
         env["GENIE_SAMPLE_SIZE"] = str(sample_size)
     if sample_seed is not None:
         env["GENIE_SAMPLE_SEED"] = str(sample_seed)
+    
+    # Pass Databricks credentials for subprocess authentication
+    if databricks_host:
+        env["DATABRICKS_HOST"] = databricks_host
+    if databricks_token:
+        env["DATABRICKS_TOKEN"] = databricks_token
     
     # Build locust command
     cmd = (
