@@ -193,18 +193,26 @@ def export_conversations(
 
 # COMMAND ----------
 
-print("Starting export...")
-print("=" * 50)
+output_path = Path(output_filename)
 
-export_data = export_conversations(
-    space_id=space_id,
-    output_path=Path(output_filename),
-    include_all=include_all,
-    max_conversations=max_conversations,
-)
+if output_path.exists():
+    print(f"File already exists: {output_filename}")
+    print("Loading existing data. Delete the file if you want to re-export.")
+    with open(output_path) as f:
+        export_data = yaml.safe_load(f)
+else:
+    print("Starting export...")
+    print("=" * 50)
 
-print("=" * 50)
-print(f"Export completed! File saved to: {output_filename}")
+    export_data = export_conversations(
+        space_id=space_id,
+        output_path=output_path,
+        include_all=include_all,
+        max_conversations=max_conversations,
+    )
+
+    print("=" * 50)
+    print(f"Export completed! File saved to: {output_filename}")
 
 # COMMAND ----------
 
@@ -216,11 +224,11 @@ print(f"Export completed! File saved to: {output_filename}")
 import pandas as pd
 
 summary_data = [
-    {"Metric": "Space ID", "Value": space_id},
-    {"Metric": "Total Conversations", "Value": export_data["total_conversations"]},
-    {"Metric": "Total Messages", "Value": export_data["total_messages"]},
-    {"Metric": "Exported At", "Value": export_data["exported_at"]},
-    {"Metric": "Output File", "Value": output_filename},
+    {"Metric": "Space ID", "Value": str(space_id)},
+    {"Metric": "Total Conversations", "Value": str(export_data["total_conversations"])},
+    {"Metric": "Total Messages", "Value": str(export_data["total_messages"])},
+    {"Metric": "Exported At", "Value": str(export_data["exported_at"])},
+    {"Metric": "Output File", "Value": str(output_filename)},
 ]
 
 display(pd.DataFrame(summary_data))
@@ -237,7 +245,7 @@ for conv in export_data["conversations"][:10]:
     preview_data.append({
         "ID": conv["id"][:20] + "...",
         "Title": conv["title"][:60] + ("..." if len(conv["title"]) > 60 else ""),
-        "Messages": len(conv["messages"]),
+        "Messages": str(len(conv["messages"])),
     })
 
 if preview_data:
