@@ -28,7 +28,7 @@ class LoadTestConfig:
     """Configuration for Genie load tests."""
     
     space_id: str
-    conversations_file: str = "conversations.yaml"
+    conversations_file: str = "../conversations.yaml"
     min_wait: float = 8.0
     max_wait: float = 30.0
     sample_size: int | None = None

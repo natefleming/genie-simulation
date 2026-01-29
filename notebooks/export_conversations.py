@@ -33,7 +33,7 @@ dbutils.library.restartPython()
 # COMMAND ----------
 
 dbutils.widgets.text("space_id_override", "", "Space ID Override (leave empty to use .env)")
-dbutils.widgets.text("output_filename", "conversations.yaml", "Output Filename")
+dbutils.widgets.text("output_filename", "../conversations.yaml", "Output Filename")
 dbutils.widgets.dropdown("include_all", "false", ["true", "false"], "Include All Users' Conversations")
 dbutils.widgets.text("max_conversations", "", "Max Conversations (empty = all)")
 
