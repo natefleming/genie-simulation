@@ -26,6 +26,13 @@ Usage:
 
 from __future__ import annotations
 
+# Monkey-patch before any other imports to avoid gevent/SSL conflicts
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning, module="gevent")
+
+from gevent import monkey
+monkey.patch_all(thread=False, select=False)
+
 import logging
 import math
 import os
