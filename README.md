@@ -183,6 +183,20 @@ uv run genie-loadtest-in-memory-semantic
 uv run genie-loadtest-in-memory-semantic --capacity 2000 --context-window-size 5 --headless -u 10 -t 10m
 ```
 
+**Run locust directly:**
+
+```bash
+locust -f locustfile_in_memory_semantic.py --headless -u 5 -r 1 -t 5m
+```
+
+This gives you direct access to all Locust options without the CLI wrapper.
+
+**Important Notes:**
+
+- **Conversation Context**: The cache uses dual embeddings (question + conversation context) for semantic matching
+- **Non-Deterministic Replays**: Running the same conversation twice may not achieve 100% cache hit rate after the first message, because cache hits don't update the Genie conversation history. For deterministic testing, consider setting `GENIE_CONTEXT_WINDOW_SIZE=0` to disable context-aware caching
+- **Memory Usage**: Each cache entry stores two embeddings (~16KB with 1024-dim vectors). A capacity of 1000 entries uses approximately 16MB
+
 ---
 
 ## Running from Databricks Notebooks
@@ -292,11 +306,25 @@ GENIE_SIMILARITY_THRESHOLD=0.85
 GENIE_LRU_CAPACITY=100
 
 # In-memory semantic cache configuration (simpler - no database required)
-# GENIE_WAREHOUSE_ID=your-warehouse-id  # Already defined above
-GENIE_CACHE_CAPACITY=1000
-GENIE_CONTEXT_WINDOW_SIZE=3
-GENIE_CONTEXT_SIMILARITY_THRESHOLD=0.80
-GENIE_EMBEDDING_MODEL=databricks-gte-large-en
+GENIE_WAREHOUSE_ID=your-warehouse-id
+
+# Cache capacity and eviction
+GENIE_CACHE_CAPACITY=1000  # Max entries before LRU eviction (~16MB for 1000 entries)
+
+# Conversation context settings
+GENIE_CONTEXT_WINDOW_SIZE=3  # Number of previous messages to include (0 = disable context)
+GENIE_MAX_CONTEXT_TOKENS=2000  # Max tokens in conversation context
+
+# Similarity thresholds (0.0-1.0)
+GENIE_SIMILARITY_THRESHOLD=0.85  # Question similarity threshold
+GENIE_CONTEXT_SIMILARITY_THRESHOLD=0.80  # Context similarity threshold (lower = more lenient)
+
+# Embedding configuration
+GENIE_EMBEDDING_MODEL=databricks-gte-large-en  # Embedding model name
+GENIE_CACHE_TTL=604800  # TTL in seconds (default: 1 week)
+
+# Optional L1 LRU cache (faster but exact-match only)
+GENIE_LRU_CAPACITY=100  # Set to 0 to disable
 ```
 
 ---
@@ -446,6 +474,14 @@ Check the error messages in the output. Common causes:
 - Missing table permissions
 - Genie space is not properly configured
 - Network connectivity issues
+
+### In-Memory Cache Not Hitting on Replays
+
+If you're seeing low cache hit rates when replaying the same conversations:
+
+1. This is expected behavior with conversation context enabled - cache hits don't populate Genie's conversation history
+2. To get deterministic replays, set `GENIE_CONTEXT_WINDOW_SIZE=0` to disable context-aware caching
+3. For production use with real users, conversation context improves accuracy for multi-turn conversations with references like "show me the same for last quarter"
 
 ---
 

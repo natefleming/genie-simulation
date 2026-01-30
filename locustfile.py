@@ -146,7 +146,7 @@ class GenieLoadTestUser(User):
     1. Pick a random conversation from the exported data
     2. Replay each message in the conversation sequentially
     3. Wait a realistic amount of time between messages (simulating think time)
-    4. Start a new conversation for each replay (not reusing conversation IDs)
+    4. Start a new conversation for the first message, then continue it for subsequent messages
     """
 
     # Wait time between tasks (conversations)
@@ -205,6 +205,9 @@ class GenieLoadTestUser(User):
         conversation_id: str = conversation.get("id", "unknown")
         conversation_title: str = conversation.get("title", "Unknown")
         
+        # Track the active conversation ID for this session (starts as None)
+        active_conversation_id: str | None = None
+        
         # Truncate title for logging
         title_preview: str = conversation_title[:50] + "..." if len(conversation_title) > 50 else conversation_title
         logger.info(f"[User {self.user_id}] Replaying conversation: {conversation_id} - \"{title_preview}\" ({len(messages)} messages)")
@@ -232,9 +235,17 @@ class GenieLoadTestUser(User):
 
             try:
                 # Send the question to Genie
-                response: GenieResponse = self.genie.ask_question(content)
+                # Use None for first message, then use returned conversation_id
+                response: GenieResponse = self.genie.ask_question(content, conversation_id=active_conversation_id)
                 response_length = len(str(response)) if response else 0
                 response_time_secs: float = time.time() - start_time
+                
+                # Capture conversation_id for subsequent messages in this conversation
+                if response and response.conversation_id:
+                    active_conversation_id = response.conversation_id
+                    if i == 0:  # Log when starting new conversation
+                        logger.debug(f"[User {self.user_id}]   Started new conversation: {active_conversation_id} (original: {conversation_id})")
+                
                 logger.info(f"[User {self.user_id}]   Response received: {response_length} bytes in {response_time_secs:.2f}s")
 
             except Exception as e:

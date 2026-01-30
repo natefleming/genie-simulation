@@ -52,7 +52,6 @@ from dao_ai.config import (
 )
 from dao_ai.genie import GenieService, GenieServiceBase
 from dao_ai.genie.cache import CacheResult, InMemorySemanticCacheService, LRUCacheService
-from databricks.sdk import WorkspaceClient
 from databricks_ai_bridge.genie import Genie, GenieResponse
 from dotenv import load_dotenv
 from locust import User, between, events, task
@@ -325,8 +324,7 @@ class InMemorySemanticCachedGenieUser(User):
         logger.info("Initializing in-memory semantic cached Genie service", user=self.user_id, space_id=self.space_id)
         
         # Create base Genie service
-        workspace_client = WorkspaceClient()
-        genie = Genie(space_id=self.space_id, client=workspace_client)
+        genie = Genie(space_id=self.space_id)
         genie_service: GenieServiceBase = GenieService(genie=genie)
         
         warehouse = WarehouseModel(warehouse_id=WAREHOUSE_ID)
@@ -345,7 +343,6 @@ class InMemorySemanticCachedGenieUser(User):
         genie_service = InMemorySemanticCacheService(
             impl=genie_service,
             parameters=in_memory_semantic_cache_params,
-            workspace_client=workspace_client,
         ).initialize()
         
         # Optionally wrap with LRU cache
@@ -394,6 +391,9 @@ class InMemorySemanticCachedGenieUser(User):
         conversation_id: str = conversation.get("id", "unknown")
         conversation_title: str = conversation.get("title", "Unknown")
         
+        # Track the active conversation ID for this session (starts as None)
+        active_conversation_id: str | None = None
+        
         # Truncate title for logging
         title_preview: str = conversation_title[:50] + "..." if len(conversation_title) > 50 else conversation_title
         logger.info(
@@ -440,11 +440,23 @@ class InMemorySemanticCachedGenieUser(User):
 
             try:
                 # Send the question through the cache service
-                result: CacheResult = self.genie_service.ask_question(content, conversation_id)
+                # Use None for first message, then use returned conversation_id
+                result: CacheResult = self.genie_service.ask_question(content, active_conversation_id)
                 
                 response: GenieResponse = result.response
                 response_length = len(str(response)) if response else 0
                 response_time_secs: float = time.time() - start_time
+                
+                # Capture conversation_id for subsequent messages in this conversation
+                if response and response.conversation_id:
+                    active_conversation_id = response.conversation_id
+                    if i == 0:  # Log when starting new conversation
+                        logger.debug(
+                            "Started new conversation",
+                            user=self.user_id,
+                            new_conversation_id=active_conversation_id,
+                            original_conversation_id=conversation_id,
+                        )
                 
                 # Determine cache status from result
                 if result.cache_hit:
