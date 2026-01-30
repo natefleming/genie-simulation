@@ -11,6 +11,8 @@ Environment Variables:
     GENIE_MAX_WAIT: Maximum wait time between messages in seconds (default: 30)
     GENIE_SAMPLE_SIZE: Number of conversations to sample (default: all)
     GENIE_SAMPLE_SEED: Random seed for reproducible sampling (default: None)
+    DATABRICKS_HOST: Databricks workspace URL (required, passed from notebook)
+    DATABRICKS_TOKEN: Databricks auth token (required, passed from notebook)
 """
 
 import logging
@@ -66,6 +68,10 @@ SAMPLE_SIZE: int | None = int(_sample_size_str) if _sample_size_str.isdigit() el
 _sample_seed_str = os.environ.get("GENIE_SAMPLE_SEED", "")
 SAMPLE_SEED: int | None = int(_sample_seed_str) if _sample_seed_str.isdigit() else None
 
+# Databricks auth (passed from notebook via environment variables)
+DATABRICKS_HOST = os.environ.get("DATABRICKS_HOST", "")
+DATABRICKS_TOKEN = os.environ.get("DATABRICKS_TOKEN", "")
+
 # Load conversations at module level
 try:
     _raw_data = load_conversations(CONVERSATIONS_FILE)
@@ -113,8 +119,11 @@ class GenieLoadTestUser(User):
         if not self.conversations:
             raise ValueError("No conversations found. Check GENIE_CONVERSATIONS_FILE.")
 
+        if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
+            raise ValueError("DATABRICKS_HOST and DATABRICKS_TOKEN must be set")
+
         print(f"[User {self.user_id}] Initializing Genie for space: {self.space_id}")
-        self.client = WorkspaceClient()
+        self.client = WorkspaceClient(host=DATABRICKS_HOST, token=DATABRICKS_TOKEN)
         self.genie = Genie(
             space_id=self.space_id,
             client=self.client,

@@ -95,13 +95,12 @@ print("-" * 50)
 
 # COMMAND ----------
 
-from databricks.sdk import WorkspaceClient
 from genie_simulation.notebook_runner import run_load_test
 
 # Get auth credentials from notebook context to pass to subprocess
-client = WorkspaceClient()
-databricks_host = client.config.host
-databricks_token = client.config.token
+ctx = dbutils.notebook.entry_point.getDbutils().notebook().getContext()
+databricks_host = ctx.apiUrl().get()
+databricks_token = ctx.apiToken().get()
 
 results = run_load_test(
     conversations_file=conversations_file,

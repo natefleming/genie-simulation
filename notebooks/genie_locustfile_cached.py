@@ -20,6 +20,8 @@ Environment Variables:
     GENIE_CACHE_TTL: Cache TTL in seconds (default: 86400)
     GENIE_SIMILARITY_THRESHOLD: Semantic similarity threshold (default: 0.85)
     GENIE_LRU_CAPACITY: LRU cache capacity (default: 100)
+    DATABRICKS_HOST: Databricks workspace URL (required, passed from notebook)
+    DATABRICKS_TOKEN: Databricks auth token (required, passed from notebook)
 """
 
 import logging
@@ -40,6 +42,7 @@ from dao_ai.config import (
 )
 from dao_ai.genie import GenieService, GenieServiceBase
 from dao_ai.genie.cache import CacheResult, LRUCacheService, SemanticCacheService
+from databricks.sdk import WorkspaceClient
 from databricks_ai_bridge.genie import Genie, GenieResponse
 from locust import User, between, events, task
 
@@ -93,6 +96,10 @@ WAREHOUSE_ID = os.environ.get("GENIE_WAREHOUSE_ID", "")
 CACHE_TTL = int(os.environ.get("GENIE_CACHE_TTL", "86400"))
 SIMILARITY_THRESHOLD = float(os.environ.get("GENIE_SIMILARITY_THRESHOLD", "0.85"))
 LRU_CAPACITY = int(os.environ.get("GENIE_LRU_CAPACITY", "100"))
+
+# Databricks auth (passed from notebook via environment variables)
+DATABRICKS_HOST = os.environ.get("DATABRICKS_HOST", "")
+DATABRICKS_TOKEN = os.environ.get("DATABRICKS_TOKEN", "")
 
 # Load conversations at module level
 try:
@@ -189,10 +196,14 @@ class CachedGenieLoadTestUser(User):
         if not WAREHOUSE_ID:
             raise ValueError("GENIE_WAREHOUSE_ID is required.")
 
+        if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
+            raise ValueError("DATABRICKS_HOST and DATABRICKS_TOKEN must be set")
+
         print(f"[User {self.user_id}] Initializing cached Genie service for space: {self.space_id}")
         
-        # Create base Genie service
-        genie = Genie(space_id=self.space_id)
+        # Create base Genie service with explicit credentials
+        client = WorkspaceClient(host=DATABRICKS_HOST, token=DATABRICKS_TOKEN)
+        genie = Genie(space_id=self.space_id, client=client)
         genie_service: GenieServiceBase = GenieService(genie=genie)
         
         # Configure database connection for semantic cache
