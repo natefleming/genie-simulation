@@ -18,6 +18,7 @@ Environment Variables:
 import logging
 import os
 import random
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,15 @@ import yaml
 from databricks.sdk import WorkspaceClient
 from databricks_ai_bridge.genie import Genie, GenieResponse
 from locust import User, between, events, task
+from loguru import logger
+
+# Configure loguru for clean key=value output
+logger.remove()
+logger.add(
+    sys.stdout,
+    format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}",
+    level="INFO",
+)
 
 # Suppress noisy third-party library logs
 logging.getLogger("databricks.sdk").setLevel(logging.WARNING)
@@ -75,14 +85,16 @@ DATABRICKS_TOKEN = os.environ.get("DATABRICKS_TOKEN", "")
 # Load conversations at module level
 try:
     _raw_data = load_conversations(CONVERSATIONS_FILE)
-    print(f"Loaded {_raw_data['total_conversations']} conversations "
-          f"with {_raw_data['total_messages']} messages")
+    logger.info(
+        f"conversations_loaded total={_raw_data['total_conversations']} "
+        f"messages={_raw_data['total_messages']}"
+    )
 
     _all_conversations = _raw_data.get("conversations", [])
     _sampled_conversations = sample_conversations(_all_conversations, SAMPLE_SIZE, SAMPLE_SEED)
 
     if SAMPLE_SIZE and SAMPLE_SIZE < len(_all_conversations):
-        print(f"Sampled {len(_sampled_conversations)} conversations")
+        logger.info(f"conversations_sampled count={len(_sampled_conversations)}")
 
     CONVERSATIONS_DATA: dict[str, Any] = {
         "space_id": os.environ.get("GENIE_SPACE_ID") or _raw_data.get("space_id", ""),
@@ -91,7 +103,7 @@ try:
         "conversations": _sampled_conversations,
     }
 except FileNotFoundError:
-    print(f"Conversations file '{CONVERSATIONS_FILE}' not found.")
+    logger.warning(f"conversations_not_found file={CONVERSATIONS_FILE}")
     CONVERSATIONS_DATA = {"space_id": os.environ.get("GENIE_SPACE_ID", ""), "conversations": []}
 
 
@@ -122,7 +134,7 @@ class GenieLoadTestUser(User):
         if not DATABRICKS_HOST or not DATABRICKS_TOKEN:
             raise ValueError("DATABRICKS_HOST and DATABRICKS_TOKEN must be set")
 
-        print(f"[User {self.user_id}] Initializing Genie for space: {self.space_id}")
+        logger.info(f"user_init user_id={self.user_id} space_id={self.space_id}")
         self.client = WorkspaceClient(host=DATABRICKS_HOST, token=DATABRICKS_TOKEN)
         self.genie = Genie(
             space_id=self.space_id,
@@ -142,7 +154,10 @@ class GenieLoadTestUser(User):
             return
 
         conversation_id: str = conversation.get("id", "unknown")
-        print(f"[User {self.user_id}] Replaying conversation: {conversation_id} ({len(messages)} messages)")
+        logger.info(
+            f"conversation_start user_id={self.user_id} conversation_id={conversation_id} "
+            f"messages={len(messages)}"
+        )
 
         for i, msg in enumerate(messages):
             content: str = msg.get("content", "")
@@ -158,7 +173,7 @@ class GenieLoadTestUser(User):
                 response_length = len(str(response)) if response else 0
             except Exception as e:
                 exception = e
-                print(f"[User {self.user_id}] Request failed: {e}")
+                logger.error(f"request_error user_id={self.user_id} error={e}")
 
             response_time = (time.time() - start_time) * 1000  # Convert to ms
 
@@ -175,23 +190,36 @@ class GenieLoadTestUser(User):
                 time.sleep(random.uniform(MIN_WAIT / 2, MAX_WAIT / 2))
 
 
-# Event handlers for test start/stop logging
+# Event handlers for logging
+@events.request.add_listener
+def on_request(
+    request_type: str,
+    name: str,
+    response_time: float,
+    response_length: int,
+    exception: Exception | None,
+    **kwargs: Any,
+) -> None:
+    """Log each request with key=value format."""
+    status = "failure" if exception else "success"
+    logger.info(
+        f"request type={request_type} name={name} status={status} "
+        f"response_time_ms={response_time:.0f} response_length={response_length}"
+    )
+
+
 @events.test_start.add_listener
 def on_test_start(environment: Any, **kwargs: Any) -> None:
     """Log test configuration at start."""
-    print("=" * 60)
-    print("Genie Load Test Starting")
-    print("=" * 60)
-    print(f"Space ID: {CONVERSATIONS_DATA.get('space_id', 'N/A')}")
-    print(f"Conversations: {CONVERSATIONS_DATA.get('total_conversations', 0)}")
-    print(f"Total Messages: {CONVERSATIONS_DATA.get('total_messages', 0)}")
-    print(f"Wait Time Range: {MIN_WAIT}s - {MAX_WAIT}s")
-    print("=" * 60)
+    logger.info(
+        f"test_start space_id={CONVERSATIONS_DATA.get('space_id', 'N/A')} "
+        f"conversations={CONVERSATIONS_DATA.get('total_conversations', 0)} "
+        f"messages={CONVERSATIONS_DATA.get('total_messages', 0)} "
+        f"wait_min={MIN_WAIT}s wait_max={MAX_WAIT}s"
+    )
 
 
 @events.test_stop.add_listener
 def on_test_stop(environment: Any, **kwargs: Any) -> None:
     """Log summary at test end."""
-    print("=" * 60)
-    print("Genie Load Test Complete")
-    print("=" * 60)
+    logger.info("test_complete")

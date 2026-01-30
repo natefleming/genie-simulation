@@ -144,6 +144,7 @@ def run_load_test(
         f"--spawn-rate={spawn_rate} "
         f"--run-time={run_time} "
         f"--headless "
+        f"--only-summary "
         f"--locustfile={locustfile_path} "
         f"--csv={csv_prefix}"
     )
@@ -322,6 +323,7 @@ def run_cached_load_test(
         f"--spawn-rate={spawn_rate} "
         f"--run-time={run_time} "
         f"--headless "
+        f"--only-summary "
         f"--locustfile={locustfile_path} "
         f"--csv={csv_prefix}"
     )
