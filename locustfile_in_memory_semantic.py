@@ -1,16 +1,18 @@
 """
-Locust load test for Genie chatbot with caching service.
+Locust load test for Genie chatbot with in-memory semantic cache service.
 
-This load test simulates real-world usage of Genie through the dao-ai caching
-service (SemanticCacheService + LRUCacheService), tracking both latency and
-cache hit/miss metrics.
+This load test simulates real-world usage of Genie through the dao-ai in-memory
+semantic cache service, tracking both latency and cache hit/miss metrics.
+
+Unlike the standard cached version, this does not require PostgreSQL or Lakebase
+- all cache storage is in memory with built-in LRU eviction.
 
 Usage:
     # Run with web UI
-    locust -f locustfile_cached.py
+    locust -f locustfile_in_memory_semantic.py
 
     # Run headless with specific parameters
-    locust -f locustfile_cached.py --headless -u 10 -r 2 -t 5m
+    locust -f locustfile_in_memory_semantic.py --headless -u 10 -r 2 -t 5m
 
 Environment Variables:
     # Common configuration
@@ -20,15 +22,16 @@ Environment Variables:
     GENIE_SAMPLE_SIZE: Number of conversations to sample and reuse (default: all)
     GENIE_SAMPLE_SEED: Random seed for reproducible sampling (default: None)
     
-    # Cache service configuration
+    # In-memory semantic cache configuration
     GENIE_SPACE_ID: Genie space ID (required)
-    GENIE_LAKEBASE_CLIENT_ID: Lakebase client ID for cache service
-    GENIE_LAKEBASE_CLIENT_SECRET: Lakebase client secret for cache service
-    GENIE_LAKEBASE_INSTANCE: Lakebase instance name
     GENIE_WAREHOUSE_ID: Warehouse ID for cache operations
     GENIE_CACHE_TTL: Cache TTL in seconds (default: 86400)
-    GENIE_SIMILARITY_THRESHOLD: Semantic similarity threshold (default: 0.85)
-    GENIE_LRU_CAPACITY: LRU cache capacity (default: 100)
+    GENIE_SIMILARITY_THRESHOLD: Question similarity threshold (default: 0.85)
+    GENIE_CONTEXT_SIMILARITY_THRESHOLD: Context similarity threshold (default: 0.80)
+    GENIE_CACHE_CAPACITY: Maximum cache entries (default: 1000)
+    GENIE_CONTEXT_WINDOW_SIZE: Conversation context window (default: 3)
+    GENIE_EMBEDDING_MODEL: Embedding model name (default: databricks-gte-large-en)
+    GENIE_LRU_CAPACITY: Optional L1 LRU cache capacity (default: 100)
 """
 
 import logging
@@ -43,13 +46,13 @@ from typing import Any
 
 import yaml
 from dao_ai.config import (
-    DatabaseModel,
     GenieLRUCacheParametersModel,
-    GenieSemanticCacheParametersModel,
+    GenieInMemorySemanticCacheParametersModel,
     WarehouseModel,
 )
 from dao_ai.genie import GenieService, GenieServiceBase
-from dao_ai.genie.cache import CacheResult, LRUCacheService, SemanticCacheService
+from dao_ai.genie.cache import CacheResult, InMemorySemanticCacheService, LRUCacheService
+from databricks.sdk import WorkspaceClient
 from databricks_ai_bridge.genie import Genie, GenieResponse
 from dotenv import load_dotenv
 from locust import User, between, events, task
@@ -156,14 +159,15 @@ SAMPLE_SIZE: int | None = int(_sample_size_str) if _sample_size_str.isdigit() el
 _sample_seed_str = os.environ.get("GENIE_SAMPLE_SEED", "")
 SAMPLE_SEED: int | None = int(_sample_seed_str) if _sample_seed_str.isdigit() else None
 
-# Cache service configuration
+# In-memory semantic cache service configuration
 SPACE_ID = os.environ.get("GENIE_SPACE_ID", "")
-GENIE_LAKEBASE_CLIENT_ID = os.environ.get("GENIE_LAKEBASE_CLIENT_ID", "")
-GENIE_LAKEBASE_CLIENT_SECRET = os.environ.get("GENIE_LAKEBASE_CLIENT_SECRET", "")
-LAKEBASE_INSTANCE = os.environ.get("GENIE_LAKEBASE_INSTANCE", "")
 WAREHOUSE_ID = os.environ.get("GENIE_WAREHOUSE_ID", "")
 CACHE_TTL = int(os.environ.get("GENIE_CACHE_TTL", "86400"))
 SIMILARITY_THRESHOLD = float(os.environ.get("GENIE_SIMILARITY_THRESHOLD", "0.85"))
+CONTEXT_SIMILARITY_THRESHOLD = float(os.environ.get("GENIE_CONTEXT_SIMILARITY_THRESHOLD", "0.80"))
+CACHE_CAPACITY = int(os.environ.get("GENIE_CACHE_CAPACITY", "1000"))
+CONTEXT_WINDOW_SIZE = int(os.environ.get("GENIE_CONTEXT_WINDOW_SIZE", "3"))
+EMBEDDING_MODEL = os.environ.get("GENIE_EMBEDDING_MODEL", "databricks-gte-large-en")
 LRU_CAPACITY = int(os.environ.get("GENIE_LRU_CAPACITY", "100"))
 
 # Load conversations at module level to avoid repeated file reads
@@ -266,12 +270,12 @@ CACHE_METRICS = CacheMetrics()
 # Load Test User Classes
 # =============================================================================
 
-class CachedGenieLoadTestUser(User):
+class InMemorySemanticCachedGenieUser(User):
     """
-    Simulates a user interacting with Genie through the caching service.
+    Simulates a user interacting with Genie through the in-memory semantic cache service.
     
     Each user will:
-    1. Initialize the Genie service with LRU and Semantic cache layers
+    1. Initialize the Genie service with optional LRU and in-memory semantic cache layers
     2. Pick a random conversation from the exported data
     3. Replay each message in the conversation sequentially
     4. Track cache hit/miss metrics for each request
@@ -290,11 +294,11 @@ class CachedGenieLoadTestUser(User):
         self.conversations: list[dict[str, Any]] = CONVERSATIONS_DATA.get("conversations", [])
         
         # Assign unique user ID
-        CachedGenieLoadTestUser._user_counter += 1
-        self.user_id: int = CachedGenieLoadTestUser._user_counter
+        InMemorySemanticCachedGenieUser._user_counter += 1
+        self.user_id: int = InMemorySemanticCachedGenieUser._user_counter
 
     def on_start(self) -> None:
-        """Initialize the cached Genie service when a simulated user starts."""
+        """Initialize the in-memory semantic cached Genie service when a simulated user starts."""
         if not self.space_id:
             raise ValueError(
                 "No space_id found. Set GENIE_SPACE_ID environment variable "
@@ -309,12 +313,6 @@ class CachedGenieLoadTestUser(User):
 
         # Validate required cache configuration
         missing_config = []
-        if not GENIE_LAKEBASE_CLIENT_ID:
-            missing_config.append("GENIE_LAKEBASE_CLIENT_ID")
-        if not GENIE_LAKEBASE_CLIENT_SECRET:
-            missing_config.append("GENIE_LAKEBASE_CLIENT_SECRET")
-        if not LAKEBASE_INSTANCE:
-            missing_config.append("GENIE_LAKEBASE_INSTANCE")
         if not WAREHOUSE_ID:
             missing_config.append("GENIE_WAREHOUSE_ID")
         
@@ -324,52 +322,55 @@ class CachedGenieLoadTestUser(User):
                 "Please set these in your .env file or environment."
             )
 
-        logger.info("Initializing cached Genie service", user=self.user_id, space_id=self.space_id)
+        logger.info("Initializing in-memory semantic cached Genie service", user=self.user_id, space_id=self.space_id)
         
         # Create base Genie service
-        genie = Genie(space_id=self.space_id)
+        workspace_client = WorkspaceClient()
+        genie = Genie(space_id=self.space_id, client=workspace_client)
         genie_service: GenieServiceBase = GenieService(genie=genie)
-        
-        # Configure database connection for semantic cache
-        database = DatabaseModel(
-            instance_name=LAKEBASE_INSTANCE,
-            client_id=GENIE_LAKEBASE_CLIENT_ID,
-            client_secret=GENIE_LAKEBASE_CLIENT_SECRET,
-        )
         
         warehouse = WarehouseModel(warehouse_id=WAREHOUSE_ID)
         
-        # Wrap with semantic cache
-        semantic_cache_params = GenieSemanticCacheParametersModel(
-            database=database,
+        # Wrap with in-memory semantic cache
+        in_memory_semantic_cache_params = GenieInMemorySemanticCacheParametersModel(
             warehouse=warehouse,
+            embedding_model=EMBEDDING_MODEL,
             time_to_live_seconds=CACHE_TTL,
             similarity_threshold=SIMILARITY_THRESHOLD,
+            context_similarity_threshold=CONTEXT_SIMILARITY_THRESHOLD,
+            capacity=CACHE_CAPACITY,
+            context_window_size=CONTEXT_WINDOW_SIZE,
         )
         
-        genie_service = SemanticCacheService(
+        genie_service = InMemorySemanticCacheService(
             impl=genie_service,
-            parameters=semantic_cache_params,
+            parameters=in_memory_semantic_cache_params,
+            workspace_client=workspace_client,
         ).initialize()
         
-        # Wrap with LRU cache
-        lru_cache_params = GenieLRUCacheParametersModel(
-            warehouse=warehouse,
-            capacity=LRU_CAPACITY,
-            time_to_live_seconds=CACHE_TTL,
-        )
-        
-        self.genie_service = LRUCacheService(
-            impl=genie_service,
-            parameters=lru_cache_params,
-        )
+        # Optionally wrap with LRU cache
+        if LRU_CAPACITY > 0:
+            lru_cache_params = GenieLRUCacheParametersModel(
+                warehouse=warehouse,
+                capacity=LRU_CAPACITY,
+                time_to_live_seconds=CACHE_TTL,
+            )
+            
+            self.genie_service = LRUCacheService(
+                impl=genie_service,
+                parameters=lru_cache_params,
+            )
+        else:
+            self.genie_service = genie_service
         
         logger.info(
-            "Cached Genie service initialized",
+            "In-memory semantic cached Genie service initialized",
             user=self.user_id,
-            lru_capacity=LRU_CAPACITY,
+            lru_capacity=LRU_CAPACITY if LRU_CAPACITY > 0 else "disabled",
+            cache_capacity=CACHE_CAPACITY,
             ttl_s=CACHE_TTL,
             similarity=SIMILARITY_THRESHOLD,
+            context_similarity=CONTEXT_SIMILARITY_THRESHOLD,
         )
 
     @task
@@ -439,15 +440,13 @@ class CachedGenieLoadTestUser(User):
 
             try:
                 # Send the question through the cache service
-                result: CacheResult = self.genie_service.ask_question(content)
+                result: CacheResult = self.genie_service.ask_question(content, conversation_id)
                 
                 response: GenieResponse = result.response
                 response_length = len(str(response)) if response else 0
                 response_time_secs: float = time.time() - start_time
                 
                 # Determine cache status from result
-                # CacheResult has cache_hit (bool) and served_by (str | None)
-                # served_by contains class names like "LRUCacheService" or "SemanticCacheService"
                 if result.cache_hit:
                     served_by = (result.served_by or "").lower()
                     
@@ -455,7 +454,7 @@ class CachedGenieLoadTestUser(User):
                         cache_status = "hit:lru"
                         CACHE_METRICS.record_hit("lru")
                         request_type = "GENIE_LRU_HIT"
-                    elif "semantic" in served_by:
+                    elif "inmemory" in served_by or "semantic" in served_by:
                         cache_status = "hit:semantic"
                         CACHE_METRICS.record_hit("semantic")
                         request_type = "GENIE_SEMANTIC_HIT"
@@ -504,181 +503,6 @@ class CachedGenieLoadTestUser(User):
                 time.sleep(wait_time_before)
 
 
-class CachedGenieSequentialUser(User):
-    """
-    A simpler user that sends individual messages through the cache service.
-    
-    Useful for testing cache behavior with standalone questions.
-    """
-
-    wait_time = between(MIN_WAIT, MAX_WAIT)
-    
-    _user_counter: int = 0
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self.genie_service: GenieServiceBase | None = None
-        self.space_id: str = CONVERSATIONS_DATA.get("space_id", "")
-        self.all_messages: list[str] = []
-        self.last_message_time: float | None = None
-        self.message_count: int = 0
-        
-        CachedGenieSequentialUser._user_counter += 1
-        self.user_id: int = CachedGenieSequentialUser._user_counter
-
-    def on_start(self) -> None:
-        """Initialize and collect all messages."""
-        if not self.space_id:
-            raise ValueError("No space_id found. Set GENIE_SPACE_ID environment variable.")
-
-        # Validate required cache configuration
-        missing_config = []
-        if not GENIE_LAKEBASE_CLIENT_ID:
-            missing_config.append("GENIE_LAKEBASE_CLIENT_ID")
-        if not GENIE_LAKEBASE_CLIENT_SECRET:
-            missing_config.append("GENIE_LAKEBASE_CLIENT_SECRET")
-        if not LAKEBASE_INSTANCE:
-            missing_config.append("GENIE_LAKEBASE_INSTANCE")
-        if not WAREHOUSE_ID:
-            missing_config.append("GENIE_WAREHOUSE_ID")
-        
-        if missing_config:
-            raise ValueError(
-                f"Missing required environment variables: {', '.join(missing_config)}."
-            )
-
-        logger.info("Initializing cached Genie service", seq_user=self.user_id, space_id=self.space_id)
-        
-        # Create and wrap Genie service (same as CachedGenieLoadTestUser)
-        genie = Genie(space_id=self.space_id)
-        genie_service: GenieServiceBase = GenieService(genie=genie)
-        
-        database = DatabaseModel(
-            instance_name=LAKEBASE_INSTANCE,
-            client_id=GENIE_LAKEBASE_CLIENT_ID,
-            client_secret=GENIE_LAKEBASE_CLIENT_SECRET,
-        )
-        
-        warehouse = WarehouseModel(warehouse_id=WAREHOUSE_ID)
-        
-        semantic_cache_params = GenieSemanticCacheParametersModel(
-            database=database,
-            warehouse=warehouse,
-            time_to_live_seconds=CACHE_TTL,
-            similarity_threshold=SIMILARITY_THRESHOLD,
-        )
-        
-        genie_service = SemanticCacheService(
-            impl=genie_service,
-            parameters=semantic_cache_params,
-        ).initialize()
-        
-        lru_cache_params = GenieLRUCacheParametersModel(
-            warehouse=warehouse,
-            capacity=LRU_CAPACITY,
-            time_to_live_seconds=CACHE_TTL,
-        )
-        
-        self.genie_service = LRUCacheService(
-            impl=genie_service,
-            parameters=lru_cache_params,
-        )
-
-        # Flatten all messages into a single list
-        for conv in CONVERSATIONS_DATA.get("conversations", []):
-            for msg in conv.get("messages", []):
-                content: str = msg.get("content", "")
-                if content:
-                    self.all_messages.append(content)
-
-        logger.info("Collected messages for random selection", seq_user=self.user_id, count=len(self.all_messages))
-
-    @task
-    def send_random_message(self) -> None:
-        """Send a random message through the cache service."""
-        if not self.all_messages or not self.genie_service:
-            return
-
-        self.message_count += 1
-        content: str = random.choice(self.all_messages)
-        
-        content_preview: str = content[:80] + "..." if len(content) > 80 else content
-        
-        current_time: float = time.time()
-        if self.last_message_time is None:
-            logger.info(
-                "Sending message",
-                seq_user=self.user_id,
-                msg_num=self.message_count,
-                content=content_preview,
-            )
-        else:
-            wait_time: float = current_time - self.last_message_time
-            logger.info(
-                "Sending message",
-                seq_user=self.user_id,
-                msg_num=self.message_count,
-                wait_s=round(wait_time, 1),
-                content=content_preview,
-            )
-
-        start_time: float = time.time()
-        exception: Exception | None = None
-        response_length: int = 0
-        cache_status: str = "miss"
-        request_type: str = "GENIE_LIVE"
-
-        try:
-            result: CacheResult = self.genie_service.ask_question(content)
-            
-            response: GenieResponse = result.response
-            response_length = len(str(response)) if response else 0
-            response_time_secs: float = time.time() - start_time
-            
-            if result.cache_hit:
-                served_by = (result.served_by or "").lower()
-                
-                if "lru" in served_by:
-                    cache_status = "hit:lru"
-                    CACHE_METRICS.record_hit("lru")
-                    request_type = "GENIE_LRU_HIT"
-                elif "semantic" in served_by:
-                    cache_status = "hit:semantic"
-                    CACHE_METRICS.record_hit("semantic")
-                    request_type = "GENIE_SEMANTIC_HIT"
-                else:
-                    cache_status = "hit"
-                    CACHE_METRICS.record_hit("semantic")
-                    request_type = "GENIE_CACHED"
-            else:
-                cache_status = "miss"
-                CACHE_METRICS.record_miss()
-            
-            logger.info(
-                "Response received",
-                seq_user=self.user_id,
-                bytes=response_length,
-                time_s=round(response_time_secs, 2),
-                cache=cache_status,
-            )
-        except Exception as e:
-            exception = e
-            CACHE_METRICS.record_miss()
-            logger.error("Request failed", seq_user=self.user_id, error=str(e))
-
-        self.last_message_time = time.time()
-        response_time: float = (time.time() - start_time) * 1000
-
-        events.request.fire(
-            request_type=request_type,
-            name="random_message",
-            response_time=response_time,
-            response_length=response_length,
-            exception=exception,
-            context={"cache_status": cache_status},
-        )
-
-
 # =============================================================================
 # Event Handlers
 # =============================================================================
@@ -687,7 +511,7 @@ class CachedGenieSequentialUser(User):
 def on_test_start(environment: Any, **kwargs: Any) -> None:
     """Log test configuration at start."""
     logger.info("=" * 70)
-    logger.info("Cached Genie Load Test Starting")
+    logger.info("In-Memory Semantic Cached Genie Load Test Starting")
     logger.info("=" * 70)
     logger.info(
         "Test configuration",
@@ -698,11 +522,14 @@ def on_test_start(environment: Any, **kwargs: Any) -> None:
     )
     logger.info(
         "Cache configuration",
-        lakebase_instance=LAKEBASE_INSTANCE,
         warehouse_id=WAREHOUSE_ID,
         cache_ttl_s=CACHE_TTL,
         similarity_threshold=SIMILARITY_THRESHOLD,
-        lru_capacity=LRU_CAPACITY,
+        context_similarity_threshold=CONTEXT_SIMILARITY_THRESHOLD,
+        cache_capacity=CACHE_CAPACITY,
+        context_window_size=CONTEXT_WINDOW_SIZE,
+        embedding_model=EMBEDDING_MODEL,
+        lru_capacity=LRU_CAPACITY if LRU_CAPACITY > 0 else "disabled",
     )
     logger.info("=" * 70)
 
@@ -764,7 +591,7 @@ def calculate_robust_stats(stats_entry: Any) -> dict[str, float]:
 def on_test_stop(environment: Any, **kwargs: Any) -> None:
     """Log summary at test end with cache metrics."""
     logger.info("=" * 70)
-    logger.success("Cached Genie Load Test Complete")
+    logger.success("In-Memory Semantic Cached Genie Load Test Complete")
     logger.info("=" * 70)
     
     # Print cache metrics
@@ -780,7 +607,7 @@ def on_test_stop(environment: Any, **kwargs: Any) -> None:
         f"{cache_summary['lru_hit_rate']:>11.1f}%"
     )
     logger.info(
-        f"{'Semantic Cache Hits':<35} {cache_summary['semantic_hits']:>15} "
+        f"{'In-Memory Semantic Cache Hits':<35} {cache_summary['semantic_hits']:>15} "
         f"{cache_summary['semantic_hit_rate']:>11.1f}%"
     )
     logger.info(

@@ -369,6 +369,159 @@ def run_cached_load_test(
     return _read_csv_results(csv_prefix)
 
 
+def run_in_memory_semantic_load_test(
+    conversations_file: str | Path,
+    space_id: str,
+    warehouse_id: str,
+    user_count: int = 10,
+    spawn_rate: int = 2,
+    run_time: str = "5m",
+    min_wait: float = 8.0,
+    max_wait: float = 30.0,
+    sample_size: int | None = None,
+    sample_seed: int | None = None,
+    cache_ttl: int = 86400,
+    similarity_threshold: float = 0.85,
+    context_similarity_threshold: float = 0.80,
+    capacity: int = 1000,
+    context_window_size: int = 3,
+    embedding_model: str = "databricks-gte-large-en",
+    lru_capacity: int = 100,
+    csv_prefix: str = "genie_in_memory_semantic_loadtest",
+    locustfile: str | None = None,
+    verbose: bool = True,
+    databricks_host: str | None = None,
+    databricks_token: str | None = None,
+) -> LoadTestResults:
+    """
+    Run an in-memory semantic cached Genie load test using Locust via subprocess.
+    
+    Unlike run_cached_load_test, this does not require PostgreSQL or Lakebase
+    credentials - all cache storage is in memory.
+    
+    Args:
+        conversations_file: Path to the conversations YAML file
+        space_id: Genie space ID
+        warehouse_id: Warehouse ID for SQL execution
+        user_count: Number of concurrent simulated users
+        spawn_rate: Users to spawn per second
+        run_time: Duration of the test (e.g., "5m", "300s", "1h")
+        min_wait: Minimum wait time between messages in seconds
+        max_wait: Maximum wait time between messages in seconds
+        sample_size: Number of conversations to sample (None = use all)
+        sample_seed: Random seed for reproducible sampling
+        cache_ttl: Cache TTL in seconds
+        similarity_threshold: Question similarity threshold
+        context_similarity_threshold: Context similarity threshold
+        capacity: Maximum cache entries (LRU eviction when full)
+        context_window_size: Number of previous conversation turns to include
+        embedding_model: Embedding model name
+        lru_capacity: Optional L1 LRU cache capacity (0 to disable)
+        csv_prefix: Prefix for output CSV files
+        locustfile: Path to the locustfile (default: genie_locustfile_in_memory_semantic.py)
+        verbose: If True, print Locust output in real-time
+        databricks_host: Databricks workspace URL (for subprocess auth)
+        databricks_token: Databricks auth token (for subprocess auth)
+    
+    Returns:
+        LoadTestResults containing DataFrames with test metrics
+    """
+    # Resolve paths
+    conversations_path = Path(conversations_file).resolve()
+    
+    if locustfile is None:
+        locustfile = str(Path(__file__).parent.parent / "notebooks" / "genie_locustfile_in_memory_semantic.py")
+    
+    locustfile_path = Path(locustfile).resolve()
+    
+    if not conversations_path.exists():
+        raise FileNotFoundError(f"Conversations file not found: {conversations_path}")
+    
+    if not locustfile_path.exists():
+        raise FileNotFoundError(f"Locustfile not found: {locustfile_path}")
+    
+    # Set environment variables for the locustfile
+    env = os.environ.copy()
+    env["GENIE_SPACE_ID"] = space_id
+    env["GENIE_CONVERSATIONS_FILE"] = str(conversations_path)
+    env["GENIE_MIN_WAIT"] = str(min_wait)
+    env["GENIE_MAX_WAIT"] = str(max_wait)
+    env["GENIE_WAREHOUSE_ID"] = warehouse_id
+    env["GENIE_CACHE_TTL"] = str(cache_ttl)
+    env["GENIE_SIMILARITY_THRESHOLD"] = str(similarity_threshold)
+    env["GENIE_CONTEXT_SIMILARITY_THRESHOLD"] = str(context_similarity_threshold)
+    env["GENIE_CACHE_CAPACITY"] = str(capacity)
+    env["GENIE_CONTEXT_WINDOW_SIZE"] = str(context_window_size)
+    env["GENIE_EMBEDDING_MODEL"] = embedding_model
+    env["GENIE_LRU_CAPACITY"] = str(lru_capacity)
+    
+    if sample_size is not None:
+        env["GENIE_SAMPLE_SIZE"] = str(sample_size)
+    if sample_seed is not None:
+        env["GENIE_SAMPLE_SEED"] = str(sample_seed)
+    
+    # Pass Databricks credentials for subprocess authentication
+    if databricks_host:
+        env["DATABRICKS_HOST"] = databricks_host
+    if databricks_token:
+        env["DATABRICKS_TOKEN"] = databricks_token
+    
+    # Build locust command
+    cmd = (
+        f"locust "
+        f"--host=https://localhost "
+        f"--users={user_count} "
+        f"--spawn-rate={spawn_rate} "
+        f"--run-time={run_time} "
+        f"--headless "
+        f"--only-summary "
+        f"--locustfile={locustfile_path} "
+        f"--csv={csv_prefix}"
+    )
+    
+    print(f"Starting In-Memory Semantic Cached Locust load test...")
+    print(f"  Users: {user_count}")
+    print(f"  Spawn Rate: {spawn_rate}/s")
+    print(f"  Duration: {run_time}")
+    print(f"  Conversations: {conversations_path}")
+    print(f"  Cache: Capacity={capacity}, TTL={cache_ttl}s, Similarity={similarity_threshold}")
+    print(f"  Context: Window={context_window_size}, Similarity={context_similarity_threshold}")
+    print(f"  LRU: {lru_capacity if lru_capacity > 0 else 'disabled'}")
+    print("-" * 60)
+    
+    # Run locust via subprocess
+    process = subprocess.Popen(
+        shlex.split(cmd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        universal_newlines=True,
+        env=env,
+    )
+    
+    # Stream output
+    while True:
+        line = process.stdout.readline()
+        if not line and process.poll() is not None:
+            break
+        if line:
+            line = line.strip()
+            if "CPU" in line and "overload" in line.lower():
+                print(f"WARNING: {line}")
+            elif verbose:
+                print(line)
+    
+    return_code = process.wait()
+    
+    print("-" * 60)
+    if return_code == 0:
+        print("In-memory semantic cached load test completed successfully")
+    else:
+        print(f"In-memory semantic cached load test finished with return code: {return_code}")
+    
+    # Read CSV results
+    return _read_csv_results(csv_prefix)
+
+
 def cleanup_csv_files(csv_prefix: str) -> None:
     """Remove CSV files generated by the load test."""
     patterns = [

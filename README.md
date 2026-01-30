@@ -116,9 +116,20 @@ You should see output like:
 
 ### Step 2: Run the Load Test
 
-Now run the simulation to test Genie's performance:
+There are three types of load tests:
+- **Standard Load Test** - Tests Genie directly without caching
+- **Cached Load Test** - Tests Genie with PostgreSQL/Lakebase semantic caching
+- **In-Memory Semantic Cache Test** - Tests Genie with in-memory semantic caching (no database required)
 
-**Option A: With a Web Interface (recommended for first time)**
+You can run tests from either the **terminal** or from **Databricks notebooks**.
+
+---
+
+## Running from Terminal
+
+### Standard Load Test (Terminal)
+
+**With Web Interface (recommended for first time):**
 
 ```bash
 uv run genie-loadtest
@@ -126,13 +137,7 @@ uv run genie-loadtest
 
 Then open your web browser and go to: http://localhost:8089
 
-You'll see a page where you can:
-- Set the number of simulated users
-- Set how fast to add new users
-- Start and stop the test
-- Watch real-time performance charts
-
-**Option B: Without a Web Interface (headless mode)**
+**Headless mode (no web interface):**
 
 ```bash
 uv run genie-loadtest --headless -u 5 -r 1 -t 5m
@@ -143,6 +148,190 @@ uv run genie-loadtest --headless -u 5 -r 1 -t 5m
 - `-u 5` - Simulate 5 users
 - `-r 1` - Add 1 new user per second
 - `-t 5m` - Run the test for 5 minutes
+
+### Cached Load Test (Terminal)
+
+First, set up cache service credentials in your `.env` file (see Configuration section below).
+
+```bash
+uv run genie-loadtest-cached --headless -u 5 -r 1 -t 5m
+```
+
+Or with web interface:
+
+```bash
+uv run genie-loadtest-cached
+```
+
+### In-Memory Semantic Cache Load Test (Terminal)
+
+Simpler setup than cached version - only requires warehouse ID (no database credentials).
+
+```bash
+uv run genie-loadtest-in-memory-semantic --headless -u 5 -r 1 -t 5m
+```
+
+Or with web interface:
+
+```bash
+uv run genie-loadtest-in-memory-semantic
+```
+
+**Customize cache settings:**
+
+```bash
+uv run genie-loadtest-in-memory-semantic --capacity 2000 --context-window-size 5 --headless -u 10 -t 10m
+```
+
+---
+
+## Running from Databricks Notebooks
+
+Load tests can be run directly from Databricks notebooks, which is useful for testing in the same environment where Genie is deployed.
+
+### Setup
+
+1. **Upload the project** to your Databricks workspace (e.g., `/Workspace/Users/you@company.com/genie-simulation/`)
+
+2. **Create a `.env` file** in the project root with your configuration:
+
+```bash
+# Copy .env.example to .env and edit
+cp .env.example .env
+```
+
+3. **Export conversations** using the `notebooks/export_conversations.py` notebook, or use the terminal command
+
+### Standard Load Test (Notebook)
+
+1. Open `notebooks/load_test.py` in Databricks
+2. Configure the widgets at the top:
+   - **conversations_file**: Path to conversations YAML (default: `../conversations.yaml`)
+   - **user_count**: Number of concurrent users (default: 10)
+   - **spawn_rate**: Users to spawn per second (default: 2)
+   - **run_time**: Test duration (default: 5m)
+3. Run all cells
+
+The notebook will:
+- Install dependencies automatically
+- Load configuration from `.env`
+- Run the load test via Locust subprocess
+- Display results as DataFrames
+
+### Cached Load Test (Notebook)
+
+1. Open `notebooks/load_test_cached.py` in Databricks
+2. Ensure your `.env` file has the cache service credentials:
+   ```
+   GENIE_LAKEBASE_CLIENT_ID=your-client-id
+   GENIE_LAKEBASE_CLIENT_SECRET=your-client-secret
+   GENIE_LAKEBASE_INSTANCE=your-instance
+   GENIE_WAREHOUSE_ID=your-warehouse-id
+   ```
+3. Configure the widgets and run all cells
+
+The cached test will show additional metrics:
+- **GENIE_LRU_HIT**: Requests served from LRU cache (fastest)
+- **GENIE_SEMANTIC_HIT**: Requests served from semantic cache
+- **GENIE_LIVE**: Cache misses, fetched from Genie API
+
+### In-Memory Semantic Cache Load Test (Notebook)
+
+1. Open `notebooks/load_test_in_memory_semantic.py` in Databricks
+2. Ensure your `.env` file has the warehouse ID:
+   ```
+   GENIE_WAREHOUSE_ID=your-warehouse-id
+   ```
+3. Optionally configure cache settings in `.env`:
+   ```
+   GENIE_CACHE_CAPACITY=1000
+   GENIE_CONTEXT_WINDOW_SIZE=3
+   GENIE_CONTEXT_SIMILARITY_THRESHOLD=0.80
+   GENIE_EMBEDDING_MODEL=databricks-gte-large-en
+   ```
+4. Configure the widgets and run all cells
+
+The in-memory semantic cache test shows the same metrics as the cached version but with simpler setup (no database required).
+
+### Export Conversations (Notebook)
+
+1. Open `notebooks/export_conversations.py` in Databricks
+2. Set your Genie space ID (via widget or `.env`)
+3. Run all cells
+
+The notebook will export conversations to `../conversations.yaml`
+
+---
+
+## Configuration
+
+Create a `.env` file in the project root with your settings:
+
+```bash
+# Required
+GENIE_SPACE_ID=your-space-id
+
+# Path to conversations file (relative to notebooks directory)
+GENIE_CONVERSATIONS_FILE=../conversations.yaml
+
+# Wait time between messages (seconds)
+GENIE_MIN_WAIT=8
+GENIE_MAX_WAIT=30
+
+# Optional: Sampling configuration
+GENIE_SAMPLE_SIZE=10
+GENIE_SAMPLE_SEED=42
+
+# Cache service configuration (for cached load test only - requires PostgreSQL/Lakebase)
+GENIE_LAKEBASE_CLIENT_ID=your-client-id
+GENIE_LAKEBASE_CLIENT_SECRET=your-client-secret
+GENIE_LAKEBASE_INSTANCE=your-instance
+GENIE_WAREHOUSE_ID=your-warehouse-id
+GENIE_CACHE_TTL=86400
+GENIE_SIMILARITY_THRESHOLD=0.85
+GENIE_LRU_CAPACITY=100
+
+# In-memory semantic cache configuration (simpler - no database required)
+# GENIE_WAREHOUSE_ID=your-warehouse-id  # Already defined above
+GENIE_CACHE_CAPACITY=1000
+GENIE_CONTEXT_WINDOW_SIZE=3
+GENIE_CONTEXT_SIMILARITY_THRESHOLD=0.80
+GENIE_EMBEDDING_MODEL=databricks-gte-large-en
+```
+
+---
+
+## Choosing the Right Load Test
+
+| Feature | Standard | Cached (PostgreSQL) | In-Memory Semantic |
+|---------|----------|---------------------|-------------------|
+| **Database Required** | No | PostgreSQL/Lakebase | No |
+| **Setup Complexity** | Low | High | Medium |
+| **Cache Persistence** | N/A | Yes | No |
+| **Multi-Instance** | N/A | Yes | No |
+| **Memory Usage** | Low | Low | Medium |
+| **Cache Type** | None | Semantic + LRU | Semantic + LRU |
+| **Best For** | Baseline testing | Production load testing | Development/single-node testing |
+
+### When to Use Each Test
+
+**Standard Load Test:**
+- Establishing baseline performance
+- Testing Genie without caching
+- Simplest setup for quick tests
+
+**Cached Load Test (PostgreSQL/Lakebase):**
+- Production performance testing
+- Multi-instance deployments
+- When cache persistence is needed
+- Testing cache sharing across instances
+
+**In-Memory Semantic Cache Test:**
+- Development and testing environments
+- Single-node deployments
+- When database setup is not feasible
+- Quick performance testing without infrastructure overhead
+- Evaluating semantic caching benefits without database complexity
 
 ---
 
@@ -157,6 +346,26 @@ When the test runs, you'll see metrics like:
 | **Median Response Time** | How long a typical response takes (in milliseconds) |
 | **95th Percentile** | 95% of responses are faster than this time |
 | **Requests/s** | How many questions Genie handles per second |
+
+### Cached and In-Memory Semantic Load Test Metrics
+
+Both cached load tests (PostgreSQL and in-memory) show additional request types:
+
+| Request Type | What It Means |
+|--------------|---------------|
+| **GENIE_LRU_HIT** | Served from in-memory LRU cache (fastest, ~1-10ms) |
+| **GENIE_SEMANTIC_HIT** | Served from semantic cache (fast, ~100-500ms) |
+| **GENIE_LIVE** | Cache miss, fetched from Genie API (slowest, 5-30s) |
+
+At the end of a cached test, you'll also see cache hit rate summary:
+```
+test_complete total_requests=100 lru_hits=45 lru_hit_rate=45.0% semantic_hits=30 semantic_hit_rate=30.0% misses=25 miss_rate=25.0%
+```
+
+**Performance Comparison:**
+- Standard test: All requests are GENIE_LIVE (~5-30s each)
+- Cached tests: Mix of LRU hits (~1-10ms), semantic hits (~100-500ms), and live calls (~5-30s)
+- Expected cache hit rate: 50-80% for repeated queries (varies by conversation patterns)
 
 ### What Good Results Look Like
 
@@ -242,12 +451,26 @@ Check the error messages in the output. Common causes:
 
 ## Quick Reference
 
+### Terminal Commands
+
 | Command | What It Does |
 |---------|--------------|
 | `uv run export-conversations --space-id ID --include-all -o conversations.yaml` | Download conversations |
-| `uv run genie-loadtest` | Run test with web UI |
-| `uv run genie-loadtest --headless -u 5 -t 10m` | Run test for 10 min with 5 users |
-| `uv run genie-simulation` | Show help and available commands |
+| `uv run genie-loadtest` | Run standard load test with web UI |
+| `uv run genie-loadtest --headless -u 5 -t 10m` | Run standard test for 10 min with 5 users |
+| `uv run genie-loadtest-cached` | Run PostgreSQL cached load test with web UI |
+| `uv run genie-loadtest-cached --headless -u 5 -t 10m` | Run PostgreSQL cached test for 10 min with 5 users |
+| `uv run genie-loadtest-in-memory-semantic` | Run in-memory semantic cached test with web UI |
+| `uv run genie-loadtest-in-memory-semantic --headless -u 5 -t 10m` | Run in-memory cached test for 10 min with 5 users |
+
+### Databricks Notebooks
+
+| Notebook | What It Does |
+|----------|--------------|
+| `notebooks/export_conversations.py` | Export conversations from Genie space |
+| `notebooks/load_test.py` | Run standard load test (no caching) |
+| `notebooks/load_test_cached.py` | Run load test with PostgreSQL semantic cache |
+| `notebooks/load_test_in_memory_semantic.py` | Run load test with in-memory semantic cache |
 
 ---
 

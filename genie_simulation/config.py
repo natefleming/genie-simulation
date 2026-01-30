@@ -137,3 +137,46 @@ class CacheConfig:
             client_id=client_id,
             client_secret=client_secret,
         )
+
+
+@dataclass
+class InMemoryCacheConfig:
+    """Configuration for in-memory semantic cache service."""
+    
+    warehouse_id: str
+    cache_ttl: int = 86400
+    similarity_threshold: float = 0.85
+    context_similarity_threshold: float = 0.80
+    capacity: int = 1000
+    context_window_size: int = 3
+    embedding_model: str = "databricks-gte-large-en"
+    lru_capacity: int = 100  # Optional L1 LRU cache
+    
+    @classmethod
+    def from_env(cls, dbutils: any = None) -> "InMemoryCacheConfig":
+        """
+        Create in-memory cache configuration from environment variables.
+        
+        Unlike CacheConfig, this does not require Lakebase credentials since
+        all cache storage is in memory.
+        
+        Args:
+            dbutils: Databricks dbutils (not used, kept for API consistency)
+        
+        Returns:
+            InMemoryCacheConfig instance
+        """
+        warehouse_id = os.environ.get("GENIE_WAREHOUSE_ID", "")
+        if not warehouse_id:
+            raise ValueError("GENIE_WAREHOUSE_ID is required in .env file")
+        
+        return cls(
+            warehouse_id=warehouse_id,
+            cache_ttl=int(os.environ.get("GENIE_CACHE_TTL", "86400")),
+            similarity_threshold=float(os.environ.get("GENIE_SIMILARITY_THRESHOLD", "0.85")),
+            context_similarity_threshold=float(os.environ.get("GENIE_CONTEXT_SIMILARITY_THRESHOLD", "0.80")),
+            capacity=int(os.environ.get("GENIE_CACHE_CAPACITY", "1000")),
+            context_window_size=int(os.environ.get("GENIE_CONTEXT_WINDOW_SIZE", "3")),
+            embedding_model=os.environ.get("GENIE_EMBEDDING_MODEL", "databricks-gte-large-en"),
+            lru_capacity=int(os.environ.get("GENIE_LRU_CAPACITY", "100")),
+        )

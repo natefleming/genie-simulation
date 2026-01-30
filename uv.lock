@@ -763,7 +763,7 @@ wheels = [
 [[package]]
 name = "dao-ai"
 version = "0.1.19"
-source = { git = "https://github.com/natefleming/dao-ai.git#9c494881bbc3df84dd0861428e862e64c94c6019" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "databricks-agents" },
     { name = "databricks-langchain", extra = ["memory"] },
@@ -796,6 +796,10 @@ dependencies = [
     { name = "sqlparse" },
     { name = "tomli" },
     { name = "unitycatalog-ai", extra = ["databricks"] },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/27/e5/83a40b89cb023f37bdd05130c60fc8b9a2b3879393b4a988dbe565a84d69/dao_ai-0.1.19.tar.gz", hash = "sha256:cc867c0bef23d6f5d8e2e9da14af559c478fa2065192aa434e797a5af68966b1", size = 17929924, upload-time = "2026-01-30T18:29:03.099Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f2/04/6052bb0bca9c42322b0b81c94f87f5b5ce97ea0663d985d7837a91711b3a/dao_ai-0.1.19-py3-none-any.whl", hash = "sha256:672112cffbf75b5e5563c5ddf627096bffa1d0436bc9fd1530e435669437df5f", size = 247236, upload-time = "2026-01-30T18:29:00.977Z" },
 ]
 
 [[package]]
@@ -1440,7 +1444,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "dao-ai", git = "https://github.com/natefleming/dao-ai.git" },
+    { name = "dao-ai", specifier = ">=0.1.19" },
     { name = "databricks-ai-bridge", specifier = ">=0.6.0" },
     { name = "databricks-sdk", specifier = ">=0.81.0" },
     { name = "locust", specifier = ">=2.29.0" },
