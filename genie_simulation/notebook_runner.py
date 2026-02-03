@@ -536,3 +536,142 @@ def cleanup_csv_files(csv_prefix: str) -> None:
         if path.exists():
             path.unlink()
             print(f"Removed: {pattern}")
+
+
+def read_results_from_csv(csv_prefix: str = "genie_loadtest") -> LoadTestResults:
+    """
+    Read load test results directly from CSV files.
+    
+    Use this function to recover results if the notebook crashes after the
+    load test completes but before results are displayed. The CSV files
+    persist on disk even if the Python kernel crashes.
+    
+    Args:
+        csv_prefix: Prefix used when running the load test (default: "genie_loadtest")
+                   Common values:
+                   - "genie_loadtest" for standard load test
+                   - "genie_cached_loadtest" for cached load test
+                   - "genie_in_memory_semantic_loadtest" for in-memory semantic cache
+    
+    Returns:
+        LoadTestResults containing DataFrames with test metrics
+    
+    Example:
+        # If notebook crashed, run this in a new cell to recover results:
+        from genie_simulation.notebook_runner import read_results_from_csv
+        
+        results = read_results_from_csv("genie_loadtest")
+        display(results.stats_df)
+        results.display_summary()
+    """
+    return _read_csv_results(csv_prefix)
+
+
+def print_results_summary(csv_prefix: str = "genie_loadtest") -> None:
+    """
+    Print a formatted summary of load test results from CSV files.
+    
+    This is a convenience function that reads CSV files and prints a
+    comprehensive summary including latency percentiles and per-endpoint
+    breakdown.
+    
+    Args:
+        csv_prefix: Prefix used when running the load test
+    
+    Example:
+        # Quick recovery after crash:
+        from genie_simulation.notebook_runner import print_results_summary
+        print_results_summary("genie_loadtest")
+    """
+    results = _read_csv_results(csv_prefix)
+    
+    if results.stats_df.empty:
+        print(f"No results found for prefix '{csv_prefix}'")
+        print(f"Expected file: {csv_prefix}_stats.csv")
+        return
+    
+    print("=" * 70)
+    print("LOAD TEST RESULTS (from CSV)")
+    print("=" * 70)
+    
+    # Get aggregated stats
+    agg_row = results.stats_df[results.stats_df["Name"] == "Aggregated"]
+    if agg_row.empty:
+        agg_row = results.stats_df.iloc[[-1]]
+    
+    for _, row in agg_row.iterrows():
+        print(f"\n{'Metric':<35} {'Value':>20}")
+        print("-" * 70)
+        print(f"{'Total Requests':<35} {row.get('Request Count', 'N/A'):>20}")
+        print(f"{'Failed Requests':<35} {row.get('Failure Count', 'N/A'):>20}")
+        
+        # Calculate failure rate
+        total = row.get('Request Count', 0)
+        failed = row.get('Failure Count', 0)
+        if total > 0:
+            fail_rate = (failed / total) * 100
+            print(f"{'Failure Rate':<35} {f'{fail_rate:.1f}%':>20}")
+        
+        print(f"{'Requests/s':<35} {row.get('Requests/s', 'N/A'):>20}")
+        print("-" * 70)
+        
+        # Latency metrics (convert from ms to seconds for readability)
+        print("LATENCY (in seconds):")
+        avg_ms = row.get('Average Response Time', 0)
+        median_ms = row.get('Median Response Time', 0)
+        min_ms = row.get('Min Response Time', 0)
+        max_ms = row.get('Max Response Time', 0)
+        
+        print(f"{'  Average':<35} {avg_ms / 1000:>19.2f}s")
+        print(f"{'  Median (P50)':<35} {median_ms / 1000:>19.2f}s")
+        print(f"{'  Min':<35} {min_ms / 1000:>19.2f}s")
+        print(f"{'  Max':<35} {max_ms / 1000:>19.2f}s")
+        
+        # Percentiles if available
+        for pct in ['50%', '66%', '75%', '80%', '90%', '95%', '99%']:
+            col = pct
+            if col in row and pd.notna(row[col]):
+                print(f"{'  P' + pct.replace('%', ''):<35} {row[col] / 1000:>19.2f}s")
+    
+    print("-" * 70)
+    
+    # Per-endpoint breakdown
+    print("\nPER-ENDPOINT BREAKDOWN:")
+    print("-" * 80)
+    print(f"{'Endpoint':<25} {'Reqs':>8} {'Fails':>8} {'Avg(s)':>10} {'Med(s)':>10} {'P90(s)':>10}")
+    print("-" * 80)
+    
+    for _, row in results.stats_df.iterrows():
+        name = row.get('Name', '')
+        if name == 'Aggregated':
+            continue
+        
+        # Truncate long names
+        if len(name) > 24:
+            name = name[:21] + "..."
+        
+        reqs = row.get('Request Count', 0)
+        fails = row.get('Failure Count', 0)
+        avg = row.get('Average Response Time', 0) / 1000
+        med = row.get('Median Response Time', 0) / 1000
+        p90 = row.get('90%', 0) / 1000 if '90%' in row and pd.notna(row.get('90%')) else 0
+        
+        print(f"{name:<25} {reqs:>8} {fails:>8} {avg:>9.2f}s {med:>9.2f}s {p90:>9.2f}s")
+    
+    print("-" * 80)
+    
+    # Failures summary
+    if not results.failures_df.empty:
+        print(f"\nFAILURES ({len(results.failures_df)} unique):")
+        print("-" * 70)
+        for _, row in results.failures_df.iterrows():
+            print(f"  - {row.get('Name', 'Unknown')}: {row.get('Error', 'Unknown error')}")
+    
+    # Exceptions summary
+    if not results.exceptions_df.empty:
+        print(f"\nEXCEPTIONS ({len(results.exceptions_df)} unique):")
+        print("-" * 70)
+        for _, row in results.exceptions_df.iterrows():
+            print(f"  - Count: {row.get('Count', 'N/A')}, Message: {row.get('Message', 'Unknown')[:100]}")
+    
+    print("\n" + "=" * 70)

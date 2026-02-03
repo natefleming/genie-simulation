@@ -199,6 +199,27 @@ else:
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Recover Results (if notebook crashed)
+# MAGIC 
+# MAGIC If the notebook crashes after the load test completes but before results are displayed,
+# MAGIC you can recover the results by running this cell. The CSV files persist on disk.
+
+# COMMAND ----------
+
+# Uncomment and run this cell to recover results after a crash:
+
+# from genie_simulation.notebook_runner import read_results_from_csv, print_results_summary
+# 
+# # Option 1: Print formatted summary
+# print_results_summary("genie_cached_loadtest")
+# 
+# # Option 2: Get DataFrames for analysis
+# results = read_results_from_csv("genie_cached_loadtest")
+# display(results.stats_df)
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Clean Up
 
 # COMMAND ----------
