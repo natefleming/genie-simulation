@@ -45,11 +45,11 @@ import yaml
 from dao_ai.config import (
     DatabaseModel,
     GenieLRUCacheParametersModel,
-    GenieSemanticCacheParametersModel,
+    GenieContextAwareCacheParametersModel,
     WarehouseModel,
 )
 from dao_ai.genie import GenieService, GenieServiceBase
-from dao_ai.genie.cache import CacheResult, LRUCacheService, SemanticCacheService
+from dao_ai.genie.cache import CacheResult, LRUCacheService, PostgresContextAwareGenieService
 from databricks_ai_bridge.genie import Genie, GenieResponse
 from dotenv import load_dotenv
 from locust import User, between, events, task
@@ -339,15 +339,15 @@ class CachedGenieLoadTestUser(User):
         
         warehouse = WarehouseModel(warehouse_id=WAREHOUSE_ID)
         
-        # Wrap with semantic cache
-        semantic_cache_params = GenieSemanticCacheParametersModel(
+        # Wrap with context-aware semantic cache (PostgreSQL backend)
+        semantic_cache_params = GenieContextAwareCacheParametersModel(
             database=database,
             warehouse=warehouse,
             time_to_live_seconds=CACHE_TTL,
             similarity_threshold=SIMILARITY_THRESHOLD,
         )
         
-        genie_service = SemanticCacheService(
+        genie_service = PostgresContextAwareGenieService(
             impl=genie_service,
             parameters=semantic_cache_params,
         ).initialize()
@@ -561,14 +561,14 @@ class CachedGenieSequentialUser(User):
         
         warehouse = WarehouseModel(warehouse_id=WAREHOUSE_ID)
         
-        semantic_cache_params = GenieSemanticCacheParametersModel(
+        semantic_cache_params = GenieContextAwareCacheParametersModel(
             database=database,
             warehouse=warehouse,
             time_to_live_seconds=CACHE_TTL,
             similarity_threshold=SIMILARITY_THRESHOLD,
         )
         
-        genie_service = SemanticCacheService(
+        genie_service = PostgresContextAwareGenieService(
             impl=genie_service,
             parameters=semantic_cache_params,
         ).initialize()

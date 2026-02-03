@@ -51,7 +51,7 @@ from dao_ai.config import (
     WarehouseModel,
 )
 from dao_ai.genie import GenieService, GenieServiceBase
-from dao_ai.genie.cache import CacheResult, InMemorySemanticCacheService, LRUCacheService
+from dao_ai.genie.cache import CacheResult, InMemoryContextAwareGenieService, LRUCacheService
 from databricks_ai_bridge.genie import Genie, GenieResponse
 from dotenv import load_dotenv
 from locust import User, between, events, task
@@ -340,7 +340,7 @@ class InMemorySemanticCachedGenieUser(User):
             context_window_size=CONTEXT_WINDOW_SIZE,
         )
         
-        genie_service = InMemorySemanticCacheService(
+        genie_service = InMemoryContextAwareGenieService(
             impl=genie_service,
             parameters=in_memory_semantic_cache_params,
         ).initialize()
