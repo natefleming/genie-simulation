@@ -336,7 +336,7 @@ class QueryHistoryClient:
             response = self._client.statement_execution.execute_statement(
                 warehouse_id=self.warehouse_id,
                 statement=query,
-                wait_timeout="120s",
+                wait_timeout="50s",
             )
             
             if response.status and response.status.state == StatementState.SUCCEEDED:

@@ -178,7 +178,7 @@ def get_query_history_for_timerange(
         response = client.statement_execution.execute_statement(
             warehouse_id=warehouse_id,
             statement=query,
-            wait_timeout="120s",
+            wait_timeout="50s",
         )
         
         if response.status and response.status.state == StatementState.SUCCEEDED:
@@ -282,7 +282,7 @@ def get_audit_events_for_timerange(
         response = client.statement_execution.execute_statement(
             warehouse_id=warehouse_id,
             statement=query,
-            wait_timeout="120s",
+            wait_timeout="50s",
         )
         
         if response.status and response.status.state == StatementState.SUCCEEDED:
