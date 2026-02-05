@@ -24,10 +24,27 @@ import os
 import shlex
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
+
+
+def generate_results_dir(base_prefix: str, user_count: int, run_time: str) -> str:
+    """
+    Generate a results directory path with config and timestamp.
+    
+    Args:
+        base_prefix: Base prefix for the directory (e.g., "genie_loadtest")
+        user_count: Number of concurrent users in the simulation
+        run_time: Duration of the test (e.g., "60s", "5m")
+    
+    Returns:
+        Directory path like "results/genie_loadtest_5users_60s_20260204_153045"
+    """
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"results/{base_prefix}_{user_count}users_{run_time}_{timestamp}"
 
 
 @dataclass
@@ -38,7 +55,7 @@ class LoadTestResults:
     stats_history_df: pd.DataFrame
     failures_df: pd.DataFrame
     exceptions_df: pd.DataFrame
-    csv_prefix: str
+    results_dir: str
     
     def display_summary(self) -> None:
         """Print a summary of the results."""
@@ -140,7 +157,16 @@ def run_load_test(
     env["GENIE_USER_COUNT"] = str(user_count)
     env["GENIE_RUN_TIME"] = run_time
     
-    # Build locust command
+    # Generate results directory with config suffix
+    results_dir = generate_results_dir(csv_prefix, user_count, run_time)
+    
+    # Pass results directory to locustfile for detailed metrics
+    env["GENIE_RESULTS_DIR"] = results_dir
+    
+    # Create the results directory
+    os.makedirs(results_dir, exist_ok=True)
+    
+    # Build locust command (Locust will create files like locust_stats.csv)
     cmd = (
         f"locust "
         f"--host=https://localhost "
@@ -150,7 +176,7 @@ def run_load_test(
         f"--headless "
         f"--only-summary "
         f"--locustfile={locustfile_path} "
-        f"--csv=results/{csv_prefix}"
+        f"--csv={results_dir}/locust"
     )
     
     print(f"Starting Locust load test...")
@@ -158,10 +184,8 @@ def run_load_test(
     print(f"  Spawn Rate: {spawn_rate}/s")
     print(f"  Duration: {run_time}")
     print(f"  Conversations: {conversations_path}")
+    print(f"  Results: {results_dir}")
     print("-" * 60)
-    
-    # Ensure results directory exists
-    os.makedirs("results", exist_ok=True)
     
     # Run locust via subprocess
     process = subprocess.Popen(
@@ -192,16 +216,35 @@ def run_load_test(
     else:
         print(f"Load test finished with return code: {return_code}")
     
+    # Rename Locust files to generic names
+    _rename_locust_files(results_dir)
+    
     # Read CSV results
-    return _read_csv_results(csv_prefix)
+    return _read_csv_results(results_dir)
 
 
-def _read_csv_results(csv_prefix: str) -> LoadTestResults:
-    """Read Locust CSV output files into DataFrames."""
-    stats_file = f"results/{csv_prefix}_stats.csv"
-    history_file = f"results/{csv_prefix}_stats_history.csv"
-    failures_file = f"results/{csv_prefix}_failures.csv"
-    exceptions_file = f"results/{csv_prefix}_exceptions.csv"
+def _rename_locust_files(results_dir: str) -> None:
+    """Rename Locust output files to generic names."""
+    renames = [
+        ("locust_stats.csv", "stats.csv"),
+        ("locust_stats_history.csv", "stats_history.csv"),
+        ("locust_failures.csv", "failures.csv"),
+        ("locust_exceptions.csv", "exceptions.csv"),
+    ]
+    
+    for old_name, new_name in renames:
+        old_path = Path(results_dir) / old_name
+        new_path = Path(results_dir) / new_name
+        if old_path.exists():
+            old_path.rename(new_path)
+
+
+def _read_csv_results(results_dir: str) -> LoadTestResults:
+    """Read Locust CSV output files from a results directory."""
+    stats_file = f"{results_dir}/stats.csv"
+    history_file = f"{results_dir}/stats_history.csv"
+    failures_file = f"{results_dir}/failures.csv"
+    exceptions_file = f"{results_dir}/exceptions.csv"
     
     stats_df = pd.DataFrame()
     stats_history_df = pd.DataFrame()
@@ -227,7 +270,7 @@ def _read_csv_results(csv_prefix: str) -> LoadTestResults:
         stats_history_df=stats_history_df,
         failures_df=failures_df,
         exceptions_df=exceptions_df,
-        csv_prefix=csv_prefix,
+        results_dir=results_dir,
     )
 
 
@@ -326,7 +369,16 @@ def run_cached_load_test(
     env["GENIE_USER_COUNT"] = str(user_count)
     env["GENIE_RUN_TIME"] = run_time
     
-    # Build locust command
+    # Generate results directory with config suffix
+    results_dir = generate_results_dir(csv_prefix, user_count, run_time)
+    
+    # Pass results directory to locustfile for detailed metrics
+    env["GENIE_RESULTS_DIR"] = results_dir
+    
+    # Create the results directory
+    os.makedirs(results_dir, exist_ok=True)
+    
+    # Build locust command (Locust will create files like locust_stats.csv)
     cmd = (
         f"locust "
         f"--host=https://localhost "
@@ -336,7 +388,7 @@ def run_cached_load_test(
         f"--headless "
         f"--only-summary "
         f"--locustfile={locustfile_path} "
-        f"--csv=results/{csv_prefix}"
+        f"--csv={results_dir}/locust"
     )
     
     print(f"Starting Cached Locust load test...")
@@ -345,10 +397,8 @@ def run_cached_load_test(
     print(f"  Duration: {run_time}")
     print(f"  Conversations: {conversations_path}")
     print(f"  Cache: LRU={lru_capacity}, TTL={cache_ttl}s, Threshold={similarity_threshold}")
+    print(f"  Results: {results_dir}")
     print("-" * 60)
-    
-    # Ensure results directory exists
-    os.makedirs("results", exist_ok=True)
     
     # Run locust via subprocess
     process = subprocess.Popen(
@@ -379,8 +429,11 @@ def run_cached_load_test(
     else:
         print(f"Cached load test finished with return code: {return_code}")
     
+    # Rename Locust files to generic names
+    _rename_locust_files(results_dir)
+    
     # Read CSV results
-    return _read_csv_results(csv_prefix)
+    return _read_csv_results(results_dir)
 
 
 def run_in_memory_semantic_load_test(
@@ -484,7 +537,16 @@ def run_in_memory_semantic_load_test(
     env["GENIE_USER_COUNT"] = str(user_count)
     env["GENIE_RUN_TIME"] = run_time
     
-    # Build locust command
+    # Generate results directory with config suffix
+    results_dir = generate_results_dir(csv_prefix, user_count, run_time)
+    
+    # Pass results directory to locustfile for detailed metrics
+    env["GENIE_RESULTS_DIR"] = results_dir
+    
+    # Create the results directory
+    os.makedirs(results_dir, exist_ok=True)
+    
+    # Build locust command (Locust will create files like locust_stats.csv)
     cmd = (
         f"locust "
         f"--host=https://localhost "
@@ -494,7 +556,7 @@ def run_in_memory_semantic_load_test(
         f"--headless "
         f"--only-summary "
         f"--locustfile={locustfile_path} "
-        f"--csv=results/{csv_prefix}"
+        f"--csv={results_dir}/locust"
     )
     
     print(f"Starting In-Memory Semantic Cached Locust load test...")
@@ -505,10 +567,8 @@ def run_in_memory_semantic_load_test(
     print(f"  Cache: Capacity={capacity}, TTL={cache_ttl}s, Similarity={similarity_threshold}")
     print(f"  Context: Window={context_window_size}, Similarity={context_similarity_threshold}")
     print(f"  LRU: {lru_capacity if lru_capacity > 0 else 'disabled'}")
+    print(f"  Results: {results_dir}")
     print("-" * 60)
-    
-    # Ensure results directory exists
-    os.makedirs("results", exist_ok=True)
     
     # Run locust via subprocess
     process = subprocess.Popen(
@@ -539,76 +599,105 @@ def run_in_memory_semantic_load_test(
     else:
         print(f"In-memory semantic cached load test finished with return code: {return_code}")
     
-    # Read CSV results
-    return _read_csv_results(csv_prefix)
-
-
-def cleanup_csv_files(csv_prefix: str) -> None:
-    """Remove CSV files generated by the load test."""
-    patterns = [
-        f"results/{csv_prefix}_stats.csv",
-        f"results/{csv_prefix}_stats_history.csv",
-        f"results/{csv_prefix}_failures.csv",
-        f"results/{csv_prefix}_exceptions.csv",
-    ]
+    # Rename Locust files to generic names
+    _rename_locust_files(results_dir)
     
-    for pattern in patterns:
-        path = Path(pattern)
-        if path.exists():
-            path.unlink()
-            print(f"Removed: {pattern}")
+    # Read CSV results
+    return _read_csv_results(results_dir)
 
 
-def read_results_from_csv(csv_prefix: str = "genie_loadtest") -> LoadTestResults:
+def cleanup_results(base_prefix: str = "genie_loadtest") -> None:
     """
-    Read load test results directly from CSV files.
+    Remove results directories generated by load tests.
+    
+    Uses glob patterns to find and remove all matching directories, including
+    those with config suffixes (e.g., results/genie_loadtest_5users_60s_*).
+    
+    Args:
+        base_prefix: Base prefix for the directories (e.g., "genie_loadtest")
+    """
+    import shutil
+    from glob import glob
+    
+    pattern = f"results/{base_prefix}_*"
+    
+    for dir_path in glob(pattern):
+        if Path(dir_path).is_dir():
+            shutil.rmtree(dir_path)
+            print(f"Removed directory: {dir_path}")
+
+
+def read_results_from_dir(results_dir: str) -> LoadTestResults:
+    """
+    Read load test results directly from a results directory.
     
     Use this function to recover results if the notebook crashes after the
     load test completes but before results are displayed. The CSV files
     persist on disk even if the Python kernel crashes.
     
     Args:
-        csv_prefix: Prefix used when running the load test (default: "genie_loadtest")
-                   Common values:
-                   - "genie_loadtest" for standard load test
-                   - "genie_cached_loadtest" for cached load test
-                   - "genie_in_memory_semantic_loadtest" for in-memory semantic cache
+        results_dir: Path to the results directory (e.g., "results/genie_loadtest_5users_60s_20260204_153045")
     
     Returns:
         LoadTestResults containing DataFrames with test metrics
     
     Example:
         # If notebook crashed, run this in a new cell to recover results:
-        from genie_simulation.notebook_runner import read_results_from_csv
+        from genie_simulation.notebook_runner import read_results_from_dir
         
-        results = read_results_from_csv("genie_loadtest")
+        results = read_results_from_dir("results/genie_loadtest_5users_60s_20260204_153045")
         display(results.stats_df)
         results.display_summary()
     """
-    return _read_csv_results(csv_prefix)
+    return _read_csv_results(results_dir)
 
 
-def print_results_summary(csv_prefix: str = "genie_loadtest") -> None:
+def list_results_dirs(base_prefix: str = "genie_loadtest") -> list[str]:
     """
-    Print a formatted summary of load test results from CSV files.
+    List all results directories matching a prefix.
+    
+    Args:
+        base_prefix: Base prefix for the directories (e.g., "genie_loadtest")
+    
+    Returns:
+        List of matching directory paths, sorted by modification time (newest first)
+    """
+    from glob import glob
+    
+    pattern = f"results/{base_prefix}_*"
+    dirs = [d for d in glob(pattern) if Path(d).is_dir()]
+    # Sort by modification time, newest first
+    dirs.sort(key=lambda d: Path(d).stat().st_mtime, reverse=True)
+    return dirs
+
+
+def print_results_summary(results_dir: str) -> None:
+    """
+    Print a formatted summary of load test results from a results directory.
     
     This is a convenience function that reads CSV files and prints a
     comprehensive summary including latency percentiles and per-endpoint
     breakdown.
     
     Args:
-        csv_prefix: Prefix used when running the load test
+        results_dir: Path to the results directory
     
     Example:
         # Quick recovery after crash:
-        from genie_simulation.notebook_runner import print_results_summary
-        print_results_summary("genie_loadtest")
+        from genie_simulation.notebook_runner import print_results_summary, list_results_dirs
+        
+        # List available results directories
+        dirs = list_results_dirs()
+        print(dirs)
+        
+        # Print summary for the most recent one
+        print_results_summary(dirs[0])
     """
-    results = _read_csv_results(csv_prefix)
+    results = _read_csv_results(results_dir)
     
     if results.stats_df.empty:
-        print(f"No results found for prefix '{csv_prefix}'")
-        print(f"Expected file: {csv_prefix}_stats.csv")
+        print(f"No results found in '{results_dir}'")
+        print(f"Expected file: {results_dir}/stats.csv")
         return
     
     print("=" * 70)

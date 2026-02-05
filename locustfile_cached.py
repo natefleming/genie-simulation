@@ -59,7 +59,6 @@ from loguru import logger
 
 from genie_simulation.detailed_metrics import (
     DETAILED_METRICS,
-    generate_metrics_filename,
     RequestMetric,
 )
 from genie_simulation.export_to_uc import export_to_unity_catalog_if_available
@@ -706,8 +705,9 @@ def on_test_stop(environment: Any, **kwargs: Any) -> None:
         logger.info("-" * 80)
     
     # Write detailed metrics to CSV in results directory
-    os.makedirs("results", exist_ok=True)
-    csv_path = generate_metrics_filename()
+    results_dir = os.environ.get("GENIE_RESULTS_DIR", "results")
+    os.makedirs(results_dir, exist_ok=True)
+    csv_path = f"{results_dir}/detailed_metrics.csv"
     records_written = DETAILED_METRICS.to_csv(csv_path)
     if records_written > 0:
         logger.info(f"Detailed metrics written to {csv_path} ({records_written} records)")

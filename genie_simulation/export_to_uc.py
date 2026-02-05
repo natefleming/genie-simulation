@@ -6,7 +6,6 @@ when running in a Databricks notebook environment.
 """
 
 import os
-from glob import glob
 from pathlib import Path
 
 from loguru import logger
@@ -20,6 +19,8 @@ def export_to_unity_catalog_if_available() -> None:
     notebook environment) and exports the detailed metrics CSV to a UC table.
     
     In CLI mode (no Spark), this function silently returns.
+    
+    The function reads from {GENIE_RESULTS_DIR}/detailed_metrics.csv.
     """
     # Check if Spark is available
     try:
@@ -40,14 +41,14 @@ def export_to_unity_catalog_if_available() -> None:
         logger.debug("UC catalog/schema not configured - skipping UC export")
         return
     
-    # Find the most recent detailed metrics CSV file
-    csv_files = sorted(glob("results/genie_detailed_metrics_*.csv"))
-    if not csv_files:
-        logger.debug("No detailed metrics CSV files found - skipping UC export")
+    # Get the results directory from environment
+    results_dir = os.environ.get("GENIE_RESULTS_DIR", "results")
+    csv_path = Path(results_dir) / "detailed_metrics.csv"
+    
+    if not csv_path.exists():
+        logger.debug(f"Detailed metrics file not found: {csv_path} - skipping UC export")
         return
     
-    # Use the most recent file (last in sorted list by timestamp in filename)
-    csv_path = Path(csv_files[-1])
     logger.info(f"Found metrics file: {csv_path}")
     
     try:
