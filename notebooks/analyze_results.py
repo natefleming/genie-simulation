@@ -6,9 +6,23 @@
 # MAGIC results directory and provides summary statistics and visualizations.
 # MAGIC
 # MAGIC ## Usage
-# MAGIC 1. Run a load test to generate results
+# MAGIC 1. Run a load test to generate results (e.g., `load_test.py`)
 # MAGIC 2. Enter the results directory path in the widget below
 # MAGIC 3. Run all cells to see the analysis
+# MAGIC
+# MAGIC ## Analysis Sections
+# MAGIC 
+# MAGIC | Section | Purpose |
+# MAGIC |---------|---------|
+# MAGIC | **Summary Statistics** | Overall health metrics: total requests, failures, latency percentiles |
+# MAGIC | **Detailed Metrics** | Raw per-request data for drill-down analysis |
+# MAGIC | **Per-User Analysis** | Performance comparison across simulated users |
+# MAGIC | **Response Time Distribution** | Histogram and box plot showing latency spread |
+# MAGIC | **Response Time Over Duration** | Temporal analysis - how latency changes during the test |
+# MAGIC | **Prompt Latency Across Executions** | Caching effectiveness - first vs repeated query performance |
+# MAGIC | **Performance by Unique Prompt** | Identify slowest/fastest specific queries |
+# MAGIC | **Throughput Over Time** | Requests/second sustainability over the test |
+# MAGIC | **Failures and Exceptions** | Error analysis and root cause identification |
 
 # COMMAND ----------
 
@@ -87,6 +101,18 @@ print(f"  - detailed_metrics.csv: {len(detailed_metrics_df)} rows")
 
 # MAGIC %md
 # MAGIC ## Summary Statistics
+# MAGIC 
+# MAGIC **What it shows:** High-level aggregated metrics from Locust including total requests, failures, 
+# MAGIC throughput (requests/second), and latency percentiles.
+# MAGIC 
+# MAGIC **Key metrics to watch:**
+# MAGIC - **Failure Rate**: Should be <5% for a healthy system. High failure rates indicate stability issues.
+# MAGIC - **P50 (Median)**: The "typical" response time. 50% of requests are faster than this.
+# MAGIC - **P90/P95/P99**: Tail latencies. P99 shows worst-case performance for 99% of users.
+# MAGIC - **Requests/s**: Throughput achieved. Compare against target capacity.
+# MAGIC 
+# MAGIC **Analysis impact:** Use these metrics as the primary health indicators. If P99 is significantly 
+# MAGIC higher than P50, investigate outliers in the detailed analysis sections below.
 
 # COMMAND ----------
 
@@ -145,6 +171,20 @@ if not stats_df.empty:
 
 # MAGIC %md
 # MAGIC ## Detailed Metrics Analysis
+# MAGIC 
+# MAGIC **What it shows:** Per-request metrics captured during the load test, including timestamps, 
+# MAGIC prompts, SQL generated, and individual response times.
+# MAGIC 
+# MAGIC **Key columns:**
+# MAGIC - **request_started_at / request_completed_at**: Exact timing of each request
+# MAGIC - **duration_ms**: How long the request took in milliseconds
+# MAGIC - **prompt**: The question sent to Genie
+# MAGIC - **sql**: The SQL query generated (if successful)
+# MAGIC - **success**: Whether the request completed successfully
+# MAGIC - **source_conversation_id / genie_conversation_id**: Links replay source to Genie response
+# MAGIC 
+# MAGIC **Analysis impact:** This raw data enables drill-down analysis. Use it to identify specific 
+# MAGIC failing queries, correlate slow responses with specific prompts, and trace conversation flows.
 
 # COMMAND ----------
 
@@ -195,6 +235,18 @@ if not detailed_metrics_df.empty:
 
 # MAGIC %md
 # MAGIC ## Per-User Analysis
+# MAGIC 
+# MAGIC **What it shows:** Performance breakdown by simulated user (user_1, user_2, etc.). Each virtual 
+# MAGIC user runs independently, replaying conversations concurrently.
+# MAGIC 
+# MAGIC **Why it matters:**
+# MAGIC - Identifies if specific users experienced worse performance (potential thread contention)
+# MAGIC - Validates load distribution across virtual users
+# MAGIC - Detects if early-spawned users have different performance than late-spawned users
+# MAGIC 
+# MAGIC **Analysis impact:** If one user shows significantly different metrics, investigate whether 
+# MAGIC they were assigned problematic conversations or experienced resource contention. Ideally, 
+# MAGIC all users should show similar performance profiles.
 
 # COMMAND ----------
 
@@ -214,6 +266,19 @@ if not detailed_metrics_df.empty and 'user' in detailed_metrics_df.columns:
 
 # MAGIC %md
 # MAGIC ## Response Time Distribution
+# MAGIC 
+# MAGIC **What it shows:** 
+# MAGIC - **Histogram (left)**: Frequency distribution of response times. Shows how responses cluster.
+# MAGIC - **Box plot (right)**: Statistical summary showing median, quartiles, and outliers.
+# MAGIC 
+# MAGIC **How to interpret:**
+# MAGIC - **Normal distribution**: Most responses cluster around the mean - system is consistent
+# MAGIC - **Bimodal distribution**: Two distinct peaks - indicates cache hits vs misses, or different query types
+# MAGIC - **Long right tail**: Many outliers - some queries take much longer than typical
+# MAGIC - **Tight box plot**: Consistent performance. Wide box = high variability.
+# MAGIC 
+# MAGIC **Analysis impact:** A wide spread or bimodal distribution suggests the system behaves 
+# MAGIC differently for different queries. Investigate the slow outliers to identify optimization opportunities.
 
 # COMMAND ----------
 
@@ -247,10 +312,20 @@ if not detailed_metrics_df.empty:
 # MAGIC %md
 # MAGIC ## Response Time Over Test Duration
 # MAGIC 
-# MAGIC Scatter plot showing when each request ran and how long it took. This reveals:
-# MAGIC - Whether latency increases/decreases as the test progresses
-# MAGIC - Clustering of slow requests
-# MAGIC - System warm-up effects
+# MAGIC **What it shows:** A scatter plot where each dot is a single request, plotted by when it 
+# MAGIC started (x-axis) vs how long it took (y-axis). Blue dots are successful, red dots are failures.
+# MAGIC The orange line shows the rolling average trend.
+# MAGIC 
+# MAGIC **What to look for:**
+# MAGIC - **Upward trend**: Latency increasing over time - possible memory leak, resource exhaustion, or queue buildup
+# MAGIC - **Downward trend**: System warming up - caches filling, connections pooling
+# MAGIC - **Flat trend**: Stable system - ideal behavior
+# MAGIC - **Spikes/clusters**: Periodic slowdowns - check for external factors (GC, throttling)
+# MAGIC - **Red clusters**: Failure patterns - identify when and why failures occur
+# MAGIC 
+# MAGIC **Analysis impact:** This visualization reveals temporal patterns invisible in aggregate stats. 
+# MAGIC If latency degrades over time, the system may not sustain load. If early requests are slow 
+# MAGIC but later ones fast, warm-up is working. Use this to determine if test duration was sufficient.
 
 # COMMAND ----------
 
@@ -315,76 +390,119 @@ if not detailed_metrics_df.empty and 'request_started_at' in detailed_metrics_df
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## Performance by Message Position
+# MAGIC ## Prompt Latency Across Executions
 # MAGIC 
-# MAGIC Analyze how message position in a conversation affects latency.
-# MAGIC First messages (conversation start) typically take longer than subsequent messages.
+# MAGIC **What it shows:** Line chart tracking how each unique prompt's latency changes across 
+# MAGIC repeated executions. X-axis is execution number (1st, 2nd, 3rd time the prompt was run), 
+# MAGIC Y-axis is response time. Each line represents a different prompt.
+# MAGIC 
+# MAGIC **What to look for:**
+# MAGIC - **Steep drop after 1st execution**: Strong caching effect - system remembers queries
+# MAGIC - **Flat lines**: No caching benefit - each execution takes similar time
+# MAGIC - **Increasing latency**: Possible resource degradation or cache eviction
+# MAGIC - **High variance**: Inconsistent performance for the same query
+# MAGIC 
+# MAGIC **Key insight - First vs Subsequent:**
+# MAGIC - If first execution is 2-10x slower than subsequent, caching is working effectively
+# MAGIC - If no difference, either no caching or cache isn't being hit
+# MAGIC 
+# MAGIC **Analysis impact:** This directly measures caching effectiveness. A well-tuned system should 
+# MAGIC show significant improvement on repeated queries. Use the per-prompt comparison table to 
+# MAGIC identify which specific queries benefit most from caching and which don't.
 
 # COMMAND ----------
 
-if not detailed_metrics_df.empty and 'message_index' in detailed_metrics_df.columns:
-    # Group by message position
-    position_stats = detailed_metrics_df.groupby('message_index').agg({
-        'duration_ms': ['count', 'mean', 'median', 'std', 'min', 'max'],
-        'success': 'mean'
-    }).round(2)
+if not detailed_metrics_df.empty and 'prompt' in detailed_metrics_df.columns:
+    # Sort by execution time and assign execution number per prompt
+    prompt_executions = detailed_metrics_df.sort_values('request_started_at').copy()
+    prompt_executions['execution_num'] = prompt_executions.groupby('prompt').cumcount() + 1
     
-    position_stats.columns = ['count', 'mean_ms', 'median_ms', 'std_ms', 'min_ms', 'max_ms', 'success_rate']
-    position_stats['mean_s'] = (position_stats['mean_ms'] / 1000).round(2)
-    position_stats['median_s'] = (position_stats['median_ms'] / 1000).round(2)
-    position_stats['success_rate'] = (position_stats['success_rate'] * 100).round(1)
+    # Get prompts with multiple executions (at least 2)
+    execution_counts = prompt_executions.groupby('prompt').size()
+    prompts_with_repeats = execution_counts[execution_counts >= 2].index
     
-    print("Performance by Message Position in Conversation:")
-    display(position_stats[['count', 'mean_s', 'median_s', 'success_rate']])
-    
-    # Bar chart
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    
-    # Mean response time by position
-    ax1 = axes[0]
-    positions = position_stats.index.tolist()
-    means = position_stats['mean_s'].tolist()
-    stds = (position_stats['std_ms'] / 1000).tolist()
-    
-    bars = ax1.bar(positions, means, yerr=stds, capsize=5, alpha=0.7, color='steelblue')
-    ax1.set_xlabel('Message Position in Conversation')
-    ax1.set_ylabel('Mean Response Time (seconds)')
-    ax1.set_title('Response Time by Message Position')
-    ax1.set_xticks(positions)
-    ax1.grid(True, alpha=0.3, axis='y')
-    
-    # Add count labels on bars
-    for bar, count in zip(bars, position_stats['count'].tolist()):
-        ax1.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.1, 
-                f'n={count}', ha='center', va='bottom', fontsize=9)
-    
-    # Box plot by position
-    ax2 = axes[1]
-    position_data = [detailed_metrics_df[detailed_metrics_df['message_index'] == i]['duration_ms'] / 1000 
-                     for i in sorted(detailed_metrics_df['message_index'].unique())]
-    ax2.boxplot(position_data, labels=sorted(detailed_metrics_df['message_index'].unique()))
-    ax2.set_xlabel('Message Position in Conversation')
-    ax2.set_ylabel('Response Time (seconds)')
-    ax2.set_title('Response Time Distribution by Position')
-    ax2.grid(True, alpha=0.3, axis='y')
-    
-    plt.tight_layout()
-    plt.show()
-    
-    # Summary insights
-    if len(position_stats) > 1:
-        first_msg_time = position_stats.loc[0, 'mean_s'] if 0 in position_stats.index else position_stats.iloc[0]['mean_s']
-        other_msg_time = position_stats[position_stats.index > 0]['mean_s'].mean() if len(position_stats) > 1 else first_msg_time
-        print(f"\nInsight: First message avg: {first_msg_time:.2f}s, Subsequent messages avg: {other_msg_time:.2f}s")
-        if first_msg_time > other_msg_time * 1.2:
-            print("  -> First messages are significantly slower (expected due to conversation initialization)")
+    if len(prompts_with_repeats) > 0:
+        # Get top N prompts by execution count for the chart
+        top_prompts = execution_counts.nlargest(min(10, len(prompts_with_repeats))).index
+        
+        # Line chart showing latency across executions
+        fig, ax = plt.subplots(figsize=(14, 6))
+        
+        for prompt in top_prompts:
+            data = prompt_executions[prompt_executions['prompt'] == prompt]
+            label = prompt[:40] + '...' if len(prompt) > 40 else prompt
+            ax.plot(data['execution_num'], data['duration_ms'] / 1000, 
+                   marker='o', markersize=4, alpha=0.7, label=label)
+        
+        ax.set_xlabel('Execution Number')
+        ax.set_ylabel('Response Time (seconds)')
+        ax.set_title('Prompt Latency Across Repeated Executions')
+        ax.legend(bbox_to_anchor=(1.02, 1), loc='upper left', fontsize=8)
+        ax.grid(True, alpha=0.3)
+        ax.set_xticks(range(1, int(prompt_executions['execution_num'].max()) + 1))
+        
+        plt.tight_layout()
+        plt.show()
+        
+        # Summary table: first execution vs subsequent executions
+        print("\nFirst Execution vs Subsequent Executions:")
+        first_exec = prompt_executions[prompt_executions['execution_num'] == 1]
+        subsequent_exec = prompt_executions[prompt_executions['execution_num'] > 1]
+        
+        if len(subsequent_exec) > 0:
+            first_avg = first_exec['duration_ms'].mean() / 1000
+            subsequent_avg = subsequent_exec['duration_ms'].mean() / 1000
+            improvement = ((first_avg - subsequent_avg) / first_avg) * 100 if first_avg > 0 else 0
+            
+            print(f"  First execution avg: {first_avg:.2f}s ({len(first_exec)} requests)")
+            print(f"  Subsequent executions avg: {subsequent_avg:.2f}s ({len(subsequent_exec)} requests)")
+            if improvement > 0:
+                print(f"  Improvement: {improvement:.1f}% faster on repeat executions")
+            else:
+                print(f"  Change: {abs(improvement):.1f}% slower on repeat executions")
+        
+        # Per-prompt comparison table
+        prompt_comparison = []
+        for prompt in prompts_with_repeats:
+            data = prompt_executions[prompt_executions['prompt'] == prompt]
+            first = data[data['execution_num'] == 1]['duration_ms'].mean() / 1000
+            subsequent = data[data['execution_num'] > 1]['duration_ms'].mean() / 1000
+            prompt_comparison.append({
+                'prompt': prompt[:60] + '...' if len(prompt) > 60 else prompt,
+                'executions': len(data),
+                'first_exec_s': round(first, 2),
+                'subsequent_avg_s': round(subsequent, 2),
+                'change_pct': round(((first - subsequent) / first) * 100 if first > 0 else 0, 1)
+            })
+        
+        comparison_df = pd.DataFrame(prompt_comparison).sort_values('change_pct', ascending=False)
+        print("\nPer-Prompt First vs Subsequent Execution Comparison:")
+        display(comparison_df)
+    else:
+        print("No prompts with repeated executions found.")
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## Performance by Unique Prompt
 # MAGIC 
-# MAGIC Breakdown of performance by distinct prompts/questions. Identifies which queries are slowest.
+# MAGIC **What it shows:** Aggregated performance statistics for each unique prompt/question in the 
+# MAGIC test. Shows count, mean, median, and success rate for every distinct query.
+# MAGIC 
+# MAGIC **Key outputs:**
+# MAGIC - **Slowest prompts table**: Top 10 queries with highest average latency
+# MAGIC - **Fastest prompts table**: Top 10 queries with lowest average latency  
+# MAGIC - **Bar chart**: Visual ranking of the 15 slowest prompts
+# MAGIC - **Problematic prompts**: Queries with <90% success rate flagged for investigation
+# MAGIC 
+# MAGIC **What to look for:**
+# MAGIC - **Outlier prompts**: If one prompt is 10x slower, it may need query optimization
+# MAGIC - **Low success rate**: Prompts that frequently fail need investigation
+# MAGIC - **High count + high latency**: Most impactful optimization targets
+# MAGIC 
+# MAGIC **Analysis impact:** This identifies specific queries to optimize. Share the slowest prompts 
+# MAGIC list with the team responsible for the Genie space to improve SQL generation or add 
+# MAGIC instructions. Failing prompts may need prompt engineering or data model changes.
 
 # COMMAND ----------
 
@@ -457,6 +575,24 @@ if not detailed_metrics_df.empty and 'prompt' in detailed_metrics_df.columns:
 
 # MAGIC %md
 # MAGIC ## Throughput Over Time
+# MAGIC 
+# MAGIC **What it shows:** Requests per second (throughput) plotted over the duration of the test.
+# MAGIC This comes from Locust's stats_history.csv which samples metrics every few seconds.
+# MAGIC 
+# MAGIC **What to look for:**
+# MAGIC - **Ramp-up period**: Initial increase as virtual users spawn
+# MAGIC - **Steady state**: Flat line indicating consistent throughput
+# MAGIC - **Degradation**: Declining throughput over time - system can't sustain load
+# MAGIC - **Spikes/dips**: Irregular patterns indicating instability
+# MAGIC 
+# MAGIC **Expected patterns:**
+# MAGIC - Healthy system: Ramp up, then flat steady state
+# MAGIC - Overloaded system: Ramp up, then gradual decline
+# MAGIC - Unstable system: High variance throughout
+# MAGIC 
+# MAGIC **Analysis impact:** Throughput tells you if the system can handle the target load sustainably. 
+# MAGIC If throughput drops over time, the system is overloaded. Compare peak throughput against 
+# MAGIC your capacity requirements to determine if scaling is needed.
 
 # COMMAND ----------
 
@@ -483,6 +619,20 @@ if not history_df.empty and 'Timestamp' in history_df.columns:
 
 # MAGIC %md
 # MAGIC ## Failures and Exceptions
+# MAGIC 
+# MAGIC **What it shows:** 
+# MAGIC - **Failures**: HTTP-level failures or application errors caught during requests
+# MAGIC - **Exceptions**: Unexpected Python exceptions that occurred during the test
+# MAGIC 
+# MAGIC **Common failure types:**
+# MAGIC - **Timeout**: Request took too long - increase timeout or investigate slow queries
+# MAGIC - **Rate limiting (429)**: Too many requests - reduce concurrency or implement backoff
+# MAGIC - **Server errors (5xx)**: Backend issues - check Genie service health
+# MAGIC - **Auth errors (401/403)**: Token expired or permissions issue
+# MAGIC 
+# MAGIC **Analysis impact:** Even a small failure rate can indicate systemic issues. Group failures 
+# MAGIC by type to identify root causes. If failures cluster at specific times, correlate with 
+# MAGIC the "Response Time Over Test Duration" chart to identify patterns.
 
 # COMMAND ----------
 
@@ -506,6 +656,11 @@ else:
 
 # MAGIC %md
 # MAGIC ## Export to Unity Catalog
+# MAGIC 
+# MAGIC **Optional:** Export the detailed metrics to a Unity Catalog table for long-term storage, 
+# MAGIC cross-run comparison, and analysis with SQL or BI tools.
+# MAGIC 
+# MAGIC Uncomment the code below and set your catalog/schema to enable export.
 
 # COMMAND ----------
 
