@@ -81,10 +81,17 @@ default_dir = available_dirs[0] if available_dirs else ""
 
 dbutils.widgets.text("results_dir", default_dir, "Results Directory")
 
+# Widget for SQL warehouse ID (used for enrichment with system.query.history)
+import os
+default_warehouse_id = os.environ.get("GENIE_WAREHOUSE_ID", "")
+dbutils.widgets.text("warehouse_id", default_warehouse_id, "SQL Warehouse ID (for enrichment)")
+
 # COMMAND ----------
 
 results_dir = dbutils.widgets.get("results_dir")
+warehouse_id = dbutils.widgets.get("warehouse_id")
 print(f"Analyzing results from: {results_dir}")
+print(f"SQL Warehouse ID: {warehouse_id if warehouse_id else '(not set - needed for SQL metrics enrichment)'}")
 
 # COMMAND ----------
 
@@ -1214,35 +1221,38 @@ else:
 # Check if enrichment is needed
 enrichment_needed = False
 if not detailed_metrics_df.empty:
-    if 'sql_execution_time_ms' in detailed_metrics_df.columns:
-        # Check if column exists but is mostly empty
-        enriched_count = detailed_metrics_df['sql_execution_time_ms'].notna().sum()
-        sql_count = detailed_metrics_df['sql'].notna().sum()
+    sql_count = detailed_metrics_df['sql'].notna().sum()
+    
+    # Check for the new column name first (sql_total_duration_ms), fall back to old name
+    if 'sql_total_duration_ms' in detailed_metrics_df.columns:
+        enriched_count = detailed_metrics_df['sql_total_duration_ms'].notna().sum()
         if enriched_count == 0 and sql_count > 0:
             enrichment_needed = True
             print(f"⚠️  SQL execution metrics are empty ({enriched_count}/{sql_count} rows enriched)")
-            print("   The detailed_metrics.csv file was not enriched with system.query.history data.")
-            print("\n   This is expected if:")
-            print("   1. The load test completed less than 15-30 minutes ago")
-            print("   2. You haven't run the enrichment step yet")
-            print("\n   Run the next cell to enrich the metrics with SQL execution data.")
+            print("   Attempting automatic enrichment from system.query.history...")
         else:
             print(f"✓ SQL execution metrics present: {enriched_count}/{sql_count} rows ({enriched_count/sql_count*100:.1f}% coverage)")
+    elif 'sql_execution_time_ms' in detailed_metrics_df.columns:
+        # Legacy column name check
+        enriched_count = detailed_metrics_df['sql_execution_time_ms'].notna().sum()
+        if enriched_count == 0 and sql_count > 0:
+            enrichment_needed = True
+            print(f"⚠️  SQL execution metrics are empty ({enriched_count}/{sql_count} rows enriched)")
+            print("   Attempting automatic enrichment from system.query.history...")
+        else:
+            print(f"✓ SQL execution metrics present: {enriched_count}/{sql_count} rows ({enriched_count/sql_count*100:.1f}% coverage)")
+    elif sql_count > 0:
+        # No SQL metrics columns at all, need enrichment
+        enrichment_needed = True
+        print(f"ℹ️  No SQL execution metrics columns found - attempting enrichment...")
     else:
-        print("ℹ️  SQL execution metrics columns not found in detailed_metrics.csv")
+        print("ℹ️  No SQL queries in this test run - enrichment not applicable")
 else:
     print("No detailed metrics data available")
 
 # COMMAND ----------
 
-# Widget for warehouse ID (needed for enrichment)
-import os
-default_warehouse_id = os.environ.get("GENIE_WAREHOUSE_ID", "")
-dbutils.widgets.text("warehouse_id", default_warehouse_id, "SQL Warehouse ID (for enrichment)")
-
-# COMMAND ----------
-
-# Run enrichment (optional - only run if you want to enrich metrics)
+# Automatic enrichment with SQL execution metrics from system.query.history
 # 
 # This cell will:
 # 1. Read the detailed_metrics.csv from the results directory
@@ -1250,51 +1260,44 @@ dbutils.widgets.text("warehouse_id", default_warehouse_id, "SQL Warehouse ID (fo
 # 3. Match SQL queries and enrich with execution metrics
 # 4. Save the enriched file back to the same location
 #
-# IMPORTANT: Wait at least 15-30 minutes after the load test before running this!
+# NOTE: system.query.history has 15-30 minute ingestion latency.
+# If the load test just completed, enrichment may find no data.
 
-run_enrichment = False  # Set to True to run enrichment
-
-if run_enrichment and enrichment_needed:
-    warehouse_id = dbutils.widgets.get("warehouse_id")
+if enrichment_needed and warehouse_id:
+    print("=" * 70)
+    print("ENRICHING METRICS WITH SQL EXECUTION DATA")
+    print("=" * 70)
     
-    if not warehouse_id:
-        print("❌ Error: Please enter a SQL Warehouse ID in the widget above")
-        print("   This is required to query system.query.history")
-    else:
-        print("=" * 70)
-        print("ENRICHING METRICS WITH SQL EXECUTION DATA")
-        print("=" * 70)
+    # Import the enrichment function
+    import sys
+    sys.path.insert(0, "..")  # Add parent directory to path for genie_simulation module
+    
+    from genie_simulation.enrich_metrics import enrich_metrics_with_query_history
+    
+    metrics_path = Path(results_dir) / "detailed_metrics.csv"
+    
+    try:
+        enriched_df = enrich_metrics_with_query_history(
+            metrics_csv_path=str(metrics_path),
+            warehouse_id=warehouse_id,
+        )
         
-        # Import the enrichment function
-        import sys
-        sys.path.insert(0, "..")  # Add parent directory to path for genie_simulation module
+        # Reload the dataframe
+        detailed_metrics_df = enriched_df
         
-        from genie_simulation.enrich_metrics import enrich_metrics_with_query_history
+        print("\n✓ Enrichment complete!")
         
-        metrics_path = Path(results_dir) / "detailed_metrics.csv"
-        
-        try:
-            enriched_df = enrich_metrics_with_query_history(
-                metrics_csv_path=str(metrics_path),
-                warehouse_id=warehouse_id,
-            )
-            
-            # Reload the dataframe
-            detailed_metrics_df = enriched_df
-            
-            print("\n✓ Enrichment complete! Re-run the cells below to see updated SQL execution metrics.")
-            
-        except Exception as e:
-            print(f"❌ Enrichment failed: {e}")
-            print("\n   Possible causes:")
-            print("   - Invalid warehouse ID")
-            print("   - Insufficient permissions on system.query.history")
-            print("   - Load test too recent (data not yet in system tables)")
-elif run_enrichment and not enrichment_needed:
-    print("ℹ️  Enrichment not needed - metrics are already enriched or no SQL queries to enrich")
-else:
-    print("ℹ️  Enrichment skipped. Set run_enrichment = True to run.")
-    print("   Make sure to wait 15-30 minutes after the load test before enriching.")
+    except Exception as e:
+        print(f"❌ Enrichment failed: {e}")
+        print("\n   Possible causes:")
+        print("   - Invalid warehouse ID")
+        print("   - Insufficient permissions on system.query.history")
+        print("   - Load test too recent (data not yet in system tables)")
+elif enrichment_needed and not warehouse_id:
+    print("⚠️  SQL metrics enrichment skipped - no warehouse ID provided")
+    print("   Enter a SQL Warehouse ID in the widget above to enable enrichment")
+elif not enrichment_needed:
+    print("✓ SQL metrics already enriched or no SQL queries to enrich")
 
 # COMMAND ----------
 
@@ -1319,40 +1322,60 @@ else:
 
 # COMMAND ----------
 
-if not detailed_metrics_df.empty and 'sql_execution_time_ms' in detailed_metrics_df.columns:
+# Check for SQL execution metrics columns (new or legacy names)
+has_sql_metrics = (
+    'sql_total_duration_ms' in detailed_metrics_df.columns or
+    'sql_execution_time_ms' in detailed_metrics_df.columns
+)
+
+if not detailed_metrics_df.empty and has_sql_metrics:
+    # Determine which column to use for filtering
+    duration_col = 'sql_total_duration_ms' if 'sql_total_duration_ms' in detailed_metrics_df.columns else 'sql_execution_time_ms'
+    
     # Filter to rows with SQL execution metrics
-    sql_exec_df = detailed_metrics_df[detailed_metrics_df['sql_execution_time_ms'].notna()].copy()
+    sql_exec_df = detailed_metrics_df[detailed_metrics_df[duration_col].notna()].copy()
     
     if len(sql_exec_df) > 0:
         print("=" * 70)
         print("SQL EXECUTION METRICS (from system.query.history)")
         print("=" * 70)
         
-        # Calculate overhead (total time - SQL execution time)
-        sql_exec_df['overhead_ms'] = sql_exec_df['duration_ms'] - sql_exec_df['sql_execution_time_ms']
-        sql_exec_df['sql_pct_of_total'] = (sql_exec_df['sql_execution_time_ms'] / sql_exec_df['duration_ms']) * 100
+        # Calculate overhead (end-to-end time minus SQL total time in warehouse)
+        sql_total_col = 'sql_total_duration_ms' if 'sql_total_duration_ms' in sql_exec_df.columns else 'sql_execution_time_ms'
+        sql_exec_df['overhead_ms'] = sql_exec_df['duration_ms'] - sql_exec_df[sql_total_col]
+        sql_exec_df['sql_pct_of_total'] = (sql_exec_df[sql_total_col] / sql_exec_df['duration_ms']) * 100
         
         # Summary statistics
         total_requests = len(sql_exec_df)
-        total_with_metrics = sql_exec_df['sql_execution_time_ms'].notna().sum()
+        total_with_metrics = sql_exec_df[duration_col].notna().sum()
         
         print(f"\n{'Metric':<40} {'Value':>20}")
         print("-" * 60)
         print(f"{'Requests with SQL metrics':<40} {total_with_metrics:>20}")
         print(f"{'Coverage':<40} {f'{total_with_metrics/len(detailed_metrics_df)*100:.1f}%':>20}")
         
-        # Time breakdown
+        # Time breakdown - show all available metrics from system.query.history
         print(f"\n{'TIME BREAKDOWN (seconds)':<40}")
         print("-" * 60)
         avg_total = sql_exec_df['duration_ms'].mean() / 1000
-        avg_sql_exec = sql_exec_df['sql_execution_time_ms'].mean() / 1000
+        
+        # Get SQL warehouse time breakdown
+        avg_sql_total = sql_exec_df[sql_total_col].mean() / 1000 if sql_total_col in sql_exec_df.columns else 0
+        avg_sql_exec = sql_exec_df['sql_execution_time_ms'].mean() / 1000 if 'sql_execution_time_ms' in sql_exec_df.columns else 0
         avg_compile = sql_exec_df['sql_compilation_time_ms'].mean() / 1000 if 'sql_compilation_time_ms' in sql_exec_df.columns else 0
+        avg_queue_wait = sql_exec_df['sql_queue_wait_ms'].mean() / 1000 if 'sql_queue_wait_ms' in sql_exec_df.columns else 0
+        avg_compute_wait = sql_exec_df['sql_compute_wait_ms'].mean() / 1000 if 'sql_compute_wait_ms' in sql_exec_df.columns else 0
+        avg_result_fetch = sql_exec_df['sql_result_fetch_ms'].mean() / 1000 if 'sql_result_fetch_ms' in sql_exec_df.columns else 0
         avg_overhead = sql_exec_df['overhead_ms'].mean() / 1000
         
         print(f"{'  Total (end-to-end)':<40} {avg_total:>19.2f}s")
-        print(f"{'  SQL Execution':<40} {avg_sql_exec:>19.2f}s ({avg_sql_exec/avg_total*100:.1f}%)")
-        print(f"{'  SQL Compilation':<40} {avg_compile:>19.2f}s ({avg_compile/avg_total*100:.1f}%)")
-        print(f"{'  Overhead (Genie + network)':<40} {avg_overhead:>19.2f}s ({avg_overhead/avg_total*100:.1f}%)")
+        print(f"{'  SQL Total (in warehouse)':<40} {avg_sql_total:>19.2f}s ({avg_sql_total/avg_total*100:.1f}%)")
+        print(f"{'    - Execution':<40} {avg_sql_exec:>19.2f}s")
+        print(f"{'    - Compilation':<40} {avg_compile:>19.2f}s")
+        print(f"{'    - Queue Wait':<40} {avg_queue_wait:>19.2f}s")
+        print(f"{'    - Compute Wait':<40} {avg_compute_wait:>19.2f}s")
+        print(f"{'    - Result Fetch':<40} {avg_result_fetch:>19.2f}s")
+        print(f"{'  Overhead (Genie AI + network)':<40} {avg_overhead:>19.2f}s ({avg_overhead/avg_total*100:.1f}%)")
         
         # I/O metrics
         if 'sql_bytes_read' in sql_exec_df.columns:
@@ -1364,55 +1387,57 @@ if not detailed_metrics_df.empty and 'sql_execution_time_ms' in detailed_metrics
             print(f"{'  Avg Bytes Read':<40} {avg_bytes_read/1024/1024:>18.2f} MB")
             print(f"{'  Avg Rows Produced':<40} {avg_rows:>20.0f}")
         
-        # Percentile breakdown
-        print(f"\n{'SQL EXECUTION TIME PERCENTILES':<40}")
+        # Percentile breakdown using SQL total time
+        print(f"\n{'SQL TOTAL TIME PERCENTILES':<40}")
         print("-" * 60)
-        sql_exec_secs = sql_exec_df['sql_execution_time_ms'] / 1000
-        print(f"{'  P50 (Median)':<40} {sql_exec_secs.quantile(0.50):>19.2f}s")
-        print(f"{'  P90':<40} {sql_exec_secs.quantile(0.90):>19.2f}s")
-        print(f"{'  P95':<40} {sql_exec_secs.quantile(0.95):>19.2f}s")
-        print(f"{'  P99':<40} {sql_exec_secs.quantile(0.99):>19.2f}s")
+        sql_total_secs = sql_exec_df[sql_total_col] / 1000
+        print(f"{'  P50 (Median)':<40} {sql_total_secs.quantile(0.50):>19.2f}s")
+        print(f"{'  P90':<40} {sql_total_secs.quantile(0.90):>19.2f}s")
+        print(f"{'  P95':<40} {sql_total_secs.quantile(0.95):>19.2f}s")
+        print(f"{'  P99':<40} {sql_total_secs.quantile(0.99):>19.2f}s")
         
         # Visualizations
         fig, axes = plt.subplots(2, 2, figsize=(15, 10))
         
-        # 1. Time breakdown stacked bar
+        # 1. Time breakdown stacked bar - show all components
         ax1 = axes[0, 0]
-        categories = ['SQL Execution', 'SQL Compilation', 'Overhead']
-        values = [avg_sql_exec, avg_compile, avg_overhead]
-        colors = ['#2ecc71', '#3498db', '#e74c3c']
+        categories = ['Execution', 'Compilation', 'Queue Wait', 'Compute Wait', 'Result Fetch', 'AI Overhead']
+        values = [avg_sql_exec, avg_compile, avg_queue_wait, avg_compute_wait, avg_result_fetch, avg_overhead]
+        colors = ['#2ecc71', '#3498db', '#f39c12', '#9b59b6', '#1abc9c', '#e74c3c']
         ax1.bar(categories, values, color=colors, edgecolor='black', alpha=0.8)
         ax1.set_ylabel('Time (seconds)')
         ax1.set_title('Average Time Breakdown')
         ax1.grid(True, alpha=0.3, axis='y')
+        plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45, ha='right')
         for i, v in enumerate(values):
-            pct = v / avg_total * 100
-            ax1.text(i, v + 0.05, f'{v:.2f}s\n({pct:.0f}%)', ha='center', fontsize=9)
+            if v > 0.01:  # Only label non-trivial values
+                pct = v / avg_total * 100
+                ax1.text(i, v + 0.02, f'{v:.2f}s\n({pct:.0f}%)', ha='center', fontsize=7)
         
-        # 2. SQL execution time distribution
+        # 2. SQL total time distribution
         ax2 = axes[0, 1]
-        ax2.hist(sql_exec_secs, bins=30, edgecolor='black', alpha=0.7, color='steelblue')
-        ax2.axvline(sql_exec_secs.median(), color='red', linestyle='--', 
-                   label=f'Median: {sql_exec_secs.median():.2f}s')
-        ax2.axvline(sql_exec_secs.mean(), color='green', linestyle='--', 
-                   label=f'Mean: {sql_exec_secs.mean():.2f}s')
-        ax2.set_xlabel('SQL Execution Time (seconds)')
+        ax2.hist(sql_total_secs, bins=30, edgecolor='black', alpha=0.7, color='steelblue')
+        ax2.axvline(sql_total_secs.median(), color='red', linestyle='--', 
+                   label=f'Median: {sql_total_secs.median():.2f}s')
+        ax2.axvline(sql_total_secs.mean(), color='green', linestyle='--', 
+                   label=f'Mean: {sql_total_secs.mean():.2f}s')
+        ax2.set_xlabel('SQL Total Time in Warehouse (seconds)')
         ax2.set_ylabel('Frequency')
-        ax2.set_title('SQL Execution Time Distribution')
+        ax2.set_title('SQL Total Time Distribution')
         ax2.legend()
         ax2.grid(True, alpha=0.3)
         
-        # 3. SQL execution vs total latency scatter
+        # 3. SQL total vs end-to-end latency scatter
         ax3 = axes[1, 0]
-        ax3.scatter(sql_exec_df['sql_execution_time_ms'] / 1000, 
+        ax3.scatter(sql_exec_df[sql_total_col] / 1000, 
                    sql_exec_df['duration_ms'] / 1000, 
                    alpha=0.5, s=30)
         # Add diagonal line (if SQL = total)
-        max_val = max(sql_exec_df['duration_ms'].max() / 1000, sql_exec_df['sql_execution_time_ms'].max() / 1000)
+        max_val = max(sql_exec_df['duration_ms'].max() / 1000, sql_exec_df[sql_total_col].max() / 1000)
         ax3.plot([0, max_val], [0, max_val], 'r--', alpha=0.5, label='SQL = Total')
-        ax3.set_xlabel('SQL Execution Time (seconds)')
-        ax3.set_ylabel('Total Latency (seconds)')
-        ax3.set_title('SQL Execution vs Total Latency')
+        ax3.set_xlabel('SQL Total Time in Warehouse (seconds)')
+        ax3.set_ylabel('End-to-End Latency (seconds)')
+        ax3.set_title('SQL Time vs Total Latency')
         ax3.legend()
         ax3.grid(True, alpha=0.3)
         
@@ -1421,9 +1446,9 @@ if not detailed_metrics_df.empty and 'sql_execution_time_ms' in detailed_metrics
         ax4.hist(sql_exec_df['sql_pct_of_total'], bins=20, edgecolor='black', alpha=0.7, color='purple')
         ax4.axvline(sql_exec_df['sql_pct_of_total'].median(), color='red', linestyle='--',
                    label=f'Median: {sql_exec_df["sql_pct_of_total"].median():.1f}%')
-        ax4.set_xlabel('SQL Execution as % of Total Latency')
+        ax4.set_xlabel('SQL Time as % of Total Latency')
         ax4.set_ylabel('Frequency')
-        ax4.set_title('SQL Execution Time as Percentage of Total')
+        ax4.set_title('SQL Time as Percentage of Total')
         ax4.legend()
         ax4.grid(True, alpha=0.3)
         
@@ -1446,22 +1471,30 @@ if not detailed_metrics_df.empty and 'sql_execution_time_ms' in detailed_metrics
             print("  Both SQL optimization and Genie tuning can help")
         else:
             print(f"\n⚠️  Overhead dominates latency (SQL only {sql_pct_median:.1f}% of total)")
-            print("  Focus on Genie API, network, or processing optimization")
+            print("  Focus on Genie AI inference, network, or processing optimization")
         
         # Check for high variance
-        sql_cv = sql_exec_secs.std() / sql_exec_secs.mean() if sql_exec_secs.mean() > 0 else 0
+        sql_cv = sql_total_secs.std() / sql_total_secs.mean() if sql_total_secs.mean() > 0 else 0
         if sql_cv > 1.0:
-            print(f"\n⚠️  High SQL execution time variance (CV: {sql_cv:.2f})")
+            print(f"\n⚠️  High SQL time variance (CV: {sql_cv:.2f})")
             print("  Some queries are significantly slower - investigate outliers")
         else:
-            print(f"\n✓ SQL execution times are relatively consistent (CV: {sql_cv:.2f})")
+            print(f"\n✓ SQL times are relatively consistent (CV: {sql_cv:.2f})")
+        
+        # Additional insights based on wait times
+        if avg_queue_wait > 0.5:
+            print(f"\n⚠️  Significant queue wait time ({avg_queue_wait:.2f}s avg)")
+            print("  Warehouse may be at capacity - consider scaling")
+        if avg_compute_wait > 0.5:
+            print(f"\n⚠️  Significant compute startup wait ({avg_compute_wait:.2f}s avg)")
+            print("  Consider using a serverless warehouse or increasing min clusters")
             
     else:
-        print("No SQL execution metrics available (sql_execution_time_ms column is empty)")
-        print("Ensure the load test is configured to capture metrics from system.query.history")
+        print("No SQL execution metrics available (column is empty)")
+        print("Run enrichment after waiting 15-30 minutes for system.query.history ingestion")
 else:
     print("No SQL execution metrics columns found in detailed_metrics.csv")
-    print("These metrics are captured from system.query.history during load tests")
+    print("These metrics are populated by post-processing enrichment from system.query.history")
 
 # COMMAND ----------
 

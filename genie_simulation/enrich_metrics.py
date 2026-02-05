@@ -64,22 +64,39 @@ def get_query_history_for_timerange(
     start_ts = start_time.strftime("%Y-%m-%d %H:%M:%S")
     end_ts = end_time.strftime("%Y-%m-%d %H:%M:%S")
     
+    # Query system.query.history for SQL execution metrics
+    # Column mapping (system.query.history -> our field names):
+    #   - statement_id -> sql_statement_id
+    #   - total_duration_ms -> sql_total_duration_ms (total time in warehouse)
+    #   - execution_duration_ms -> sql_execution_time_ms (time executing)
+    #   - compilation_duration_ms -> sql_compilation_time_ms (time planning)
+    #   - waiting_at_capacity_duration_ms -> sql_queue_wait_ms (waiting in queue)
+    #   - waiting_for_compute_duration_ms -> sql_compute_wait_ms (waiting for startup)
+    #   - result_fetch_duration_ms -> sql_result_fetch_ms (fetching results)
+    #   - produced_rows -> sql_rows_produced
+    #   - read_bytes -> sql_bytes_read
+    #   - execution_status -> (used for filtering)
+    #   - query_source.genie_space_id -> (used for filtering to Genie queries)
     query = f"""
     SELECT
         statement_id,
         statement_text,
         start_time,
         end_time,
-        COALESCE(execution_time_ms, 0) as execution_time_ms,
-        COALESCE(compilation_time_ms, 0) as compilation_time_ms,
-        COALESCE(rows_produced, 0) as rows_produced,
+        COALESCE(total_duration_ms, 0) as total_duration_ms,
+        COALESCE(execution_duration_ms, 0) as execution_duration_ms,
+        COALESCE(compilation_duration_ms, 0) as compilation_duration_ms,
+        COALESCE(waiting_at_capacity_duration_ms, 0) as queue_wait_ms,
+        COALESCE(waiting_for_compute_duration_ms, 0) as compute_wait_ms,
+        COALESCE(result_fetch_duration_ms, 0) as result_fetch_ms,
+        COALESCE(produced_rows, 0) as rows_produced,
         COALESCE(read_bytes, 0) as bytes_read,
-        COALESCE(write_bytes, 0) as bytes_written,
-        status
+        execution_status,
+        query_source.genie_space_id as genie_space_id
     FROM {system_catalog}.query.history
     WHERE start_time >= '{start_ts}'
       AND start_time <= '{end_ts}'
-      AND statement_type = 'SELECT'
+      AND query_source.genie_space_id IS NOT NULL
     ORDER BY start_time
     """
     
@@ -94,17 +111,22 @@ def get_query_history_for_timerange(
             if response.result and response.result.data_array:
                 columns = [
                     "statement_id", "statement_text", "start_time", "end_time",
-                    "execution_time_ms", "compilation_time_ms", "rows_produced",
-                    "bytes_read", "bytes_written", "status"
+                    "total_duration_ms", "execution_duration_ms", "compilation_duration_ms",
+                    "queue_wait_ms", "compute_wait_ms", "result_fetch_ms",
+                    "rows_produced", "bytes_read", "execution_status", "genie_space_id"
                 ]
                 df = pd.DataFrame(response.result.data_array, columns=columns)
                 
-                # Convert types
-                df["execution_time_ms"] = pd.to_numeric(df["execution_time_ms"], errors="coerce").fillna(0)
-                df["compilation_time_ms"] = pd.to_numeric(df["compilation_time_ms"], errors="coerce").fillna(0)
+                # Convert numeric types
+                numeric_cols = [
+                    "total_duration_ms", "execution_duration_ms", "compilation_duration_ms",
+                    "queue_wait_ms", "compute_wait_ms", "result_fetch_ms"
+                ]
+                for col in numeric_cols:
+                    df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+                
                 df["rows_produced"] = pd.to_numeric(df["rows_produced"], errors="coerce").fillna(0).astype(int)
                 df["bytes_read"] = pd.to_numeric(df["bytes_read"], errors="coerce").fillna(0).astype(int)
-                df["bytes_written"] = pd.to_numeric(df["bytes_written"], errors="coerce").fillna(0).astype(int)
                 
                 # Normalize SQL for matching
                 df["sql_normalized"] = df["statement_text"].apply(normalize_sql)
@@ -188,13 +210,17 @@ def match_queries(
         best_idx = time_diffs.idxmin()
         match = candidates.loc[best_idx]
         
-        # Update the metrics row
+        # Update the metrics row with all SQL execution metrics
+        # These map directly from system.query.history columns
         metrics_df.at[idx, "sql_statement_id"] = match["statement_id"]
-        metrics_df.at[idx, "sql_execution_time_ms"] = match["execution_time_ms"]
-        metrics_df.at[idx, "sql_compilation_time_ms"] = match["compilation_time_ms"]
+        metrics_df.at[idx, "sql_total_duration_ms"] = match["total_duration_ms"]
+        metrics_df.at[idx, "sql_execution_time_ms"] = match["execution_duration_ms"]
+        metrics_df.at[idx, "sql_compilation_time_ms"] = match["compilation_duration_ms"]
+        metrics_df.at[idx, "sql_queue_wait_ms"] = match["queue_wait_ms"]
+        metrics_df.at[idx, "sql_compute_wait_ms"] = match["compute_wait_ms"]
+        metrics_df.at[idx, "sql_result_fetch_ms"] = match["result_fetch_ms"]
         metrics_df.at[idx, "sql_rows_produced"] = match["rows_produced"]
         metrics_df.at[idx, "sql_bytes_read"] = match["bytes_read"]
-        metrics_df.at[idx, "sql_bytes_written"] = match["bytes_written"]
         matched_count += 1
     
     # Clean up temp column
@@ -244,9 +270,9 @@ def enrich_metrics_with_query_history(
     metrics_df = pd.read_csv(metrics_csv_path)
     print(f"  Loaded {len(metrics_df)} rows")
     
-    # Check if already enriched
-    if "sql_execution_time_ms" in metrics_df.columns:
-        enriched_count = metrics_df["sql_execution_time_ms"].notna().sum()
+    # Check if already enriched (look for any of the SQL execution columns)
+    if "sql_total_duration_ms" in metrics_df.columns:
+        enriched_count = metrics_df["sql_total_duration_ms"].notna().sum()
         if enriched_count > 0:
             print(f"  Already has {enriched_count} enriched rows")
             return metrics_df
@@ -292,11 +318,23 @@ def enrich_metrics_with_query_history(
     enriched_df.to_csv(output_path, index=False)
     
     # Summary
-    enriched_count = enriched_df["sql_execution_time_ms"].notna().sum()
+    enriched_count = enriched_df["sql_total_duration_ms"].notna().sum()
     print(f"\nEnrichment complete:")
     print(f"  Total rows: {len(enriched_df)}")
     print(f"  Enriched rows: {enriched_count}")
     print(f"  Enrichment rate: {enriched_count/sql_count*100:.1f}% of SQL queries")
+    
+    # Show a sample of enriched columns
+    if enriched_count > 0:
+        print(f"\nSQL Execution Metrics (from system.query.history):")
+        print(f"  - sql_total_duration_ms: Total time in warehouse")
+        print(f"  - sql_execution_time_ms: Time executing query")
+        print(f"  - sql_compilation_time_ms: Time compiling/planning")
+        print(f"  - sql_queue_wait_ms: Time waiting in queue")
+        print(f"  - sql_compute_wait_ms: Time waiting for compute")
+        print(f"  - sql_result_fetch_ms: Time fetching results")
+        print(f"  - sql_rows_produced: Number of rows returned")
+        print(f"  - sql_bytes_read: Bytes read from storage")
     
     return enriched_df
 

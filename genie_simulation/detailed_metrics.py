@@ -37,12 +37,28 @@ class RequestMetric:
     success: bool
     error: Optional[str]
     # SQL execution metrics from system.query.history
+    # These are populated by post-processing enrichment (enrich_metrics.py)
+    # after waiting for system table ingestion (15-30 min delay)
+    #
+    # Field mapping from system.query.history columns:
+    #   - statement_id -> sql_statement_id
+    #   - total_duration_ms -> sql_total_duration_ms
+    #   - execution_duration_ms -> sql_execution_time_ms
+    #   - compilation_duration_ms -> sql_compilation_time_ms
+    #   - waiting_at_capacity_duration_ms -> sql_queue_wait_ms
+    #   - waiting_for_compute_duration_ms -> sql_compute_wait_ms
+    #   - result_fetch_duration_ms -> sql_result_fetch_ms
+    #   - produced_rows -> sql_rows_produced
+    #   - read_bytes -> sql_bytes_read
     sql_statement_id: Optional[str] = None  # Statement ID from query history
+    sql_total_duration_ms: Optional[float] = None  # Total time query spent in warehouse
     sql_execution_time_ms: Optional[float] = None  # Time spent executing SQL in warehouse
     sql_compilation_time_ms: Optional[float] = None  # Time spent compiling/planning SQL
+    sql_queue_wait_ms: Optional[float] = None  # Time waiting in queue at capacity
+    sql_compute_wait_ms: Optional[float] = None  # Time waiting for compute resources
+    sql_result_fetch_ms: Optional[float] = None  # Time fetching results
     sql_rows_produced: Optional[int] = None  # Number of rows returned by query
     sql_bytes_read: Optional[int] = None  # Bytes read during execution
-    sql_bytes_written: Optional[int] = None  # Bytes written during execution
 
 
 class DetailedMetricsCollector:
@@ -125,15 +141,19 @@ class DetailedMetricsCollector:
         df = self.to_dataframe()
         if df.empty:
             # Write empty file with headers
+            # Header columns match RequestMetric dataclass fields
             with open(path, "w", newline="") as f:
                 writer = csv.writer(f)
                 writer.writerow([
+                    # Core metrics from load test
                     "run_id", "space_id", "request_started_at", "request_completed_at", "duration_ms",
                     "concurrent_users", "user", "prompt", "source_conversation_id",
                     "source_message_id", "genie_conversation_id", "genie_message_id",
                     "message_index", "sql", "response_size", "success", "error",
-                    "sql_statement_id", "sql_execution_time_ms", "sql_compilation_time_ms",
-                    "sql_rows_produced", "sql_bytes_read", "sql_bytes_written"
+                    # SQL execution metrics from system.query.history (post-processing enrichment)
+                    "sql_statement_id", "sql_total_duration_ms", "sql_execution_time_ms",
+                    "sql_compilation_time_ms", "sql_queue_wait_ms", "sql_compute_wait_ms",
+                    "sql_result_fetch_ms", "sql_rows_produced", "sql_bytes_read"
                 ])
             return 0
         

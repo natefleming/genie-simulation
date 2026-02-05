@@ -35,17 +35,36 @@ from databricks.sdk.service.sql import StatementState
 
 @dataclass
 class SQLExecutionMetrics:
-    """Metrics from system.query.history for a SQL execution."""
+    """
+    Metrics from system.query.history for a SQL execution.
+    
+    Field mapping from system.query.history columns:
+        - statement_id: Unique query identifier
+        - total_duration_ms: Total time in warehouse (total_duration_ms)
+        - execution_time_ms: Time executing query (execution_duration_ms)
+        - compilation_time_ms: Time compiling/planning (compilation_duration_ms)
+        - queue_wait_ms: Time waiting in queue (waiting_at_capacity_duration_ms)
+        - compute_wait_ms: Time waiting for compute (waiting_for_compute_duration_ms)
+        - result_fetch_ms: Time fetching results (result_fetch_duration_ms)
+        - rows_produced: Number of rows returned (produced_rows)
+        - bytes_read: Bytes read from storage (read_bytes)
+        - execution_status: Query status (execution_status)
+        - genie_space_id: Genie space that originated query (query_source.genie_space_id)
+    """
     
     statement_id: str
+    total_duration_ms: float
     execution_time_ms: float
     compilation_time_ms: float
+    queue_wait_ms: float
+    compute_wait_ms: float
+    result_fetch_ms: float
     rows_produced: int
     bytes_read: int
-    bytes_written: int
     start_time: datetime
     end_time: datetime
-    status: str
+    execution_status: str
+    genie_space_id: Optional[str] = None
 
 
 class QueryHistoryClient:
@@ -139,17 +158,31 @@ class QueryHistoryClient:
         
         # Query system.query.history
         # Note: We use LIKE with the first part of the query to find matches
+        # Column mapping from system.query.history:
+        #   - total_duration_ms: Total time in warehouse
+        #   - execution_duration_ms: Time executing (not execution_time_ms)
+        #   - compilation_duration_ms: Time planning (not compilation_time_ms)
+        #   - waiting_at_capacity_duration_ms: Queue wait time
+        #   - waiting_for_compute_duration_ms: Compute startup wait
+        #   - result_fetch_duration_ms: Result fetch time
+        #   - produced_rows: Rows returned (not rows_produced)
+        #   - read_bytes: Bytes read
+        #   - execution_status: Query status (not status)
         query = f"""
         SELECT
             statement_id,
-            COALESCE(execution_time_ms, 0) as execution_time_ms,
-            COALESCE(compilation_time_ms, 0) as compilation_time_ms,
-            COALESCE(rows_produced, 0) as rows_produced,
+            COALESCE(total_duration_ms, 0) as total_duration_ms,
+            COALESCE(execution_duration_ms, 0) as execution_duration_ms,
+            COALESCE(compilation_duration_ms, 0) as compilation_duration_ms,
+            COALESCE(waiting_at_capacity_duration_ms, 0) as queue_wait_ms,
+            COALESCE(waiting_for_compute_duration_ms, 0) as compute_wait_ms,
+            COALESCE(result_fetch_duration_ms, 0) as result_fetch_ms,
+            COALESCE(produced_rows, 0) as rows_produced,
             COALESCE(read_bytes, 0) as bytes_read,
-            COALESCE(write_bytes, 0) as bytes_written,
             start_time,
             end_time,
-            status
+            execution_status,
+            query_source.genie_space_id as genie_space_id
         FROM {self.system_catalog}.query.history
         WHERE start_time >= '{start_ts}'
           AND start_time <= '{end_ts}'
@@ -169,16 +202,24 @@ class QueryHistoryClient:
             if response.status and response.status.state == StatementState.SUCCEEDED:
                 if response.result and response.result.data_array:
                     row = response.result.data_array[0]
+                    # Column order: statement_id, total_duration_ms, execution_duration_ms,
+                    #               compilation_duration_ms, queue_wait_ms, compute_wait_ms,
+                    #               result_fetch_ms, rows_produced, bytes_read,
+                    #               start_time, end_time, execution_status, genie_space_id
                     metrics = SQLExecutionMetrics(
                         statement_id=str(row[0]) if row[0] else "",
-                        execution_time_ms=float(row[1]) if row[1] else 0.0,
-                        compilation_time_ms=float(row[2]) if row[2] else 0.0,
-                        rows_produced=int(row[3]) if row[3] else 0,
-                        bytes_read=int(row[4]) if row[4] else 0,
-                        bytes_written=int(row[5]) if row[5] else 0,
-                        start_time=datetime.fromisoformat(str(row[6])) if row[6] else start_time,
-                        end_time=datetime.fromisoformat(str(row[7])) if row[7] else end_time,
-                        status=str(row[8]) if row[8] else "UNKNOWN",
+                        total_duration_ms=float(row[1]) if row[1] else 0.0,
+                        execution_time_ms=float(row[2]) if row[2] else 0.0,
+                        compilation_time_ms=float(row[3]) if row[3] else 0.0,
+                        queue_wait_ms=float(row[4]) if row[4] else 0.0,
+                        compute_wait_ms=float(row[5]) if row[5] else 0.0,
+                        result_fetch_ms=float(row[6]) if row[6] else 0.0,
+                        rows_produced=int(row[7]) if row[7] else 0,
+                        bytes_read=int(row[8]) if row[8] else 0,
+                        start_time=datetime.fromisoformat(str(row[9])) if row[9] else start_time,
+                        end_time=datetime.fromisoformat(str(row[10])) if row[10] else end_time,
+                        execution_status=str(row[11]) if row[11] else "UNKNOWN",
+                        genie_space_id=str(row[12]) if row[12] else None,
                     )
                     
                     # Cache the result
@@ -247,22 +288,28 @@ class QueryHistoryClient:
         start_ts = start_time.strftime("%Y-%m-%d %H:%M:%S")
         end_ts = end_time.strftime("%Y-%m-%d %H:%M:%S")
         
+        # Query for all Genie-originated queries in time range
+        # Uses query_source.genie_space_id to filter to Genie queries only
         query = f"""
         SELECT
             statement_id,
             statement_text,
-            COALESCE(execution_time_ms, 0) as execution_time_ms,
-            COALESCE(compilation_time_ms, 0) as compilation_time_ms,
-            COALESCE(rows_produced, 0) as rows_produced,
+            COALESCE(total_duration_ms, 0) as total_duration_ms,
+            COALESCE(execution_duration_ms, 0) as execution_duration_ms,
+            COALESCE(compilation_duration_ms, 0) as compilation_duration_ms,
+            COALESCE(waiting_at_capacity_duration_ms, 0) as queue_wait_ms,
+            COALESCE(waiting_for_compute_duration_ms, 0) as compute_wait_ms,
+            COALESCE(result_fetch_duration_ms, 0) as result_fetch_ms,
+            COALESCE(produced_rows, 0) as rows_produced,
             COALESCE(read_bytes, 0) as bytes_read,
-            COALESCE(write_bytes, 0) as bytes_written,
             start_time,
             end_time,
-            status
+            execution_status,
+            query_source.genie_space_id as genie_space_id
         FROM {self.system_catalog}.query.history
         WHERE start_time >= '{start_ts}'
           AND start_time <= '{end_ts}'
-          AND statement_type = 'SELECT'
+          AND query_source.genie_space_id IS NOT NULL
         ORDER BY start_time
         """
         
@@ -278,16 +325,25 @@ class QueryHistoryClient:
             if response.status and response.status.state == StatementState.SUCCEEDED:
                 if response.result and response.result.data_array:
                     for row in response.result.data_array:
+                        # Column order: statement_id, statement_text, total_duration_ms,
+                        #               execution_duration_ms, compilation_duration_ms,
+                        #               queue_wait_ms, compute_wait_ms, result_fetch_ms,
+                        #               rows_produced, bytes_read, start_time, end_time,
+                        #               execution_status, genie_space_id
                         metrics = SQLExecutionMetrics(
                             statement_id=str(row[0]) if row[0] else "",
-                            execution_time_ms=float(row[2]) if row[2] else 0.0,
-                            compilation_time_ms=float(row[3]) if row[3] else 0.0,
-                            rows_produced=int(row[4]) if row[4] else 0,
-                            bytes_read=int(row[5]) if row[5] else 0,
-                            bytes_written=int(row[6]) if row[6] else 0,
-                            start_time=datetime.fromisoformat(str(row[7])) if row[7] else start_time,
-                            end_time=datetime.fromisoformat(str(row[8])) if row[8] else end_time,
-                            status=str(row[9]) if row[9] else "UNKNOWN",
+                            total_duration_ms=float(row[2]) if row[2] else 0.0,
+                            execution_time_ms=float(row[3]) if row[3] else 0.0,
+                            compilation_time_ms=float(row[4]) if row[4] else 0.0,
+                            queue_wait_ms=float(row[5]) if row[5] else 0.0,
+                            compute_wait_ms=float(row[6]) if row[6] else 0.0,
+                            result_fetch_ms=float(row[7]) if row[7] else 0.0,
+                            rows_produced=int(row[8]) if row[8] else 0,
+                            bytes_read=int(row[9]) if row[9] else 0,
+                            start_time=datetime.fromisoformat(str(row[10])) if row[10] else start_time,
+                            end_time=datetime.fromisoformat(str(row[11])) if row[11] else end_time,
+                            execution_status=str(row[12]) if row[12] else "UNKNOWN",
+                            genie_space_id=str(row[13]) if row[13] else None,
                         )
                         results.append(metrics)
                         
