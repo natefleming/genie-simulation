@@ -76,15 +76,23 @@ for i, d in enumerate(available_dirs[:20]):
 # Widget for selecting multiple results directories (comma-separated)
 default_dirs = ", ".join(available_dirs[:3]) if len(available_dirs) >= 3 else ", ".join(available_dirs)
 
-dbutils.widgets.text("results_dirs", default_dirs, "Results Directories (comma-separated)")
+dbutils.widgets.text("results_dirs", default_dirs, "Results Directories (comma-separated, results/ prefix optional)")
 dbutils.widgets.text("space_id_filter", "", "Filter by Space ID (leave blank for all)")
 
 # COMMAND ----------
 
 # Parse selected directories (comma-separated)
 results_dirs_text = dbutils.widgets.get("results_dirs")
-results_dirs = [d.strip() for d in results_dirs_text.strip().split(",") if d.strip()]
+raw_dirs = [d.strip() for d in results_dirs_text.strip().split(",") if d.strip()]
 
+# Normalize paths - prepend results/ if not already present
+results_dirs = []
+for d in raw_dirs:
+    if not d.startswith("results/") and not d.startswith("/"):
+        d = f"results/{d}"
+    results_dirs.append(d)
+
+print(f"Current working directory: {os.getcwd()}")
 print(f"Selected {len(results_dirs)} directories for comparison:")
 for d in results_dirs:
     exists = "✓" if Path(d).exists() else "✗ NOT FOUND"
