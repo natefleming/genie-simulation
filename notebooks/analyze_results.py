@@ -284,6 +284,10 @@ if not detailed_metrics_df.empty and 'user' in detailed_metrics_df.columns:
 
 import matplotlib.pyplot as plt
 
+# Create images directory in results
+images_dir = Path(results_dir) / "images"
+images_dir.mkdir(exist_ok=True)
+
 if not detailed_metrics_df.empty:
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     
@@ -305,6 +309,8 @@ if not detailed_metrics_df.empty:
     ax2.set_title('Response Time Box Plot')
     
     plt.tight_layout()
+    fig.savefig(images_dir / "response_time_distribution.png", dpi=150, bbox_inches='tight')
+    print(f"Saved: {images_dir / 'response_time_distribution.png'}")
     plt.show()
 
 # COMMAND ----------
@@ -372,6 +378,8 @@ if not detailed_metrics_df.empty and 'request_started_at' in detailed_metrics_df
     ax.legend(handles=legend_elements + ax.get_legend_handles_labels()[0], loc='upper right')
     
     plt.tight_layout()
+    fig.savefig(images_dir / "response_time_over_duration.png", dpi=150, bbox_inches='tight')
+    print(f"Saved: {images_dir / 'response_time_over_duration.png'}")
     plt.show()
     
     # Print summary
@@ -442,6 +450,8 @@ if not detailed_metrics_df.empty and 'prompt' in detailed_metrics_df.columns:
         ax.set_xticks(range(1, int(prompt_executions['execution_num'].max()) + 1))
         
         plt.tight_layout()
+        fig.savefig(images_dir / "prompt_latency_across_executions.png", dpi=150, bbox_inches='tight')
+        print(f"Saved: {images_dir / 'prompt_latency_across_executions.png'}")
         plt.show()
         
         # Summary table: first execution vs subsequent executions
@@ -552,6 +562,8 @@ if not detailed_metrics_df.empty and 'prompt' in detailed_metrics_df.columns:
                    f'n={count}', va='center', fontsize=8)
         
         plt.tight_layout()
+        fig.savefig(images_dir / "slowest_prompts.png", dpi=150, bbox_inches='tight')
+        print(f"Saved: {images_dir / 'slowest_prompts.png'}")
         plt.show()
     
     # Summary statistics
@@ -613,6 +625,8 @@ if not history_df.empty and 'Timestamp' in history_df.columns:
     ax.grid(True, alpha=0.3)
     
     plt.tight_layout()
+    fig.savefig(images_dir / "throughput_over_time.png", dpi=150, bbox_inches='tight')
+    print(f"Saved: {images_dir / 'throughput_over_time.png'}")
     plt.show()
 
 # COMMAND ----------
@@ -655,11 +669,952 @@ else:
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ---
+# MAGIC # Advanced Analysis
+# MAGIC
+# MAGIC The following sections provide deeper insights into Genie inference performance,
+# MAGIC focusing on SQL generation, conversation context, concurrency impact, and error patterns.
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Conversation Context Analysis
+# MAGIC
+# MAGIC **What it shows:** How Genie's performance changes across multi-turn conversations. Each conversation
+# MAGIC has multiple messages (message_index 0, 1, 2...), and this analysis tracks how latency and success
+# MAGIC rate vary by position in the conversation.
+# MAGIC
+# MAGIC **Why it matters:** Multi-turn conversations are core to Genie's value proposition. Users build context
+# MAGIC across multiple questions. Understanding how performance changes with conversation depth is critical for:
+# MAGIC - **User Experience**: Later messages shouldn't be significantly slower than early ones
+# MAGIC - **Context Window Optimization**: Determine if passing conversation history creates overhead
+# MAGIC - **Capacity Planning**: Multi-turn conversations may consume more resources
+# MAGIC
+# MAGIC **Key insights to look for:**
+# MAGIC - **Increasing latency by position**: If 3rd/4th messages are much slower, context window is creating overhead
+# MAGIC - **Decreasing success rate**: If later messages fail more, context may be confusing Genie
+# MAGIC - **Flat performance**: Ideal - indicates Genie handles context efficiently
+# MAGIC - **Conversation length distribution**: Most conversations short? Long conversations common?
+# MAGIC
+# MAGIC **Analysis impact:** Use this to:
+# MAGIC - Set expectations for user experience in multi-turn scenarios
+# MAGIC - Optimize context window size (how much history to include)
+# MAGIC - Identify if specific conversation patterns (e.g., follow-up questions) perform poorly
+# MAGIC - Determine if prompt engineering is needed for multi-turn scenarios
+
+# COMMAND ----------
+
+if not detailed_metrics_df.empty and 'message_index' in detailed_metrics_df.columns:
+    print("=" * 70)
+    print("CONVERSATION CONTEXT ANALYSIS")
+    print("=" * 70)
+
+    # Overall conversation statistics
+    total_conversations = detailed_metrics_df['source_conversation_id'].nunique()
+    total_messages = len(detailed_metrics_df)
+    avg_messages_per_conversation = total_messages / total_conversations if total_conversations > 0 else 0
+    max_conversation_length = detailed_metrics_df['message_index'].max() + 1
+
+    print(f"\n{'Metric':<40} {'Value':>20}")
+    print("-" * 60)
+    print(f"{'Total Conversations':<40} {total_conversations:>20}")
+    print(f"{'Total Messages':<40} {total_messages:>20}")
+    print(f"{'Avg Messages per Conversation':<40} {avg_messages_per_conversation:>20.2f}")
+    print(f"{'Longest Conversation (messages)':<40} {max_conversation_length:>20}")
+
+    # Performance by message position
+    print("\n" + "=" * 60)
+    print("PERFORMANCE BY MESSAGE POSITION IN CONVERSATION")
+    print("=" * 60)
+
+    position_stats = detailed_metrics_df.groupby('message_index').agg({
+        'duration_ms': ['count', 'mean', 'median', 'std'],
+        'success': 'mean'
+    }).round(2)
+
+    position_stats.columns = ['count', 'mean_ms', 'median_ms', 'std_ms', 'success_rate']
+    position_stats['mean_s'] = (position_stats['mean_ms'] / 1000).round(2)
+    position_stats['median_s'] = (position_stats['median_ms'] / 1000).round(2)
+    position_stats['success_rate'] = (position_stats['success_rate'] * 100).round(1)
+
+    print("\nLatency and Success Rate by Message Position:")
+    display(position_stats[['count', 'mean_s', 'median_s', 'success_rate']])
+
+    # Visualizations
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+
+    # 1. Average latency by message position (line chart)
+    ax1 = axes[0, 0]
+    ax1.plot(position_stats.index, position_stats['mean_s'], marker='o', linewidth=2, markersize=8, color='steelblue', label='Mean')
+    ax1.plot(position_stats.index, position_stats['median_s'], marker='s', linewidth=2, markersize=6, color='orange', label='Median', linestyle='--')
+    ax1.set_xlabel('Message Position in Conversation')
+    ax1.set_ylabel('Response Time (seconds)')
+    ax1.set_title('Latency by Message Position')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+    ax1.set_xticks(position_stats.index)
+
+    # 2. Box plot by message position
+    ax2 = axes[0, 1]
+    positions_to_plot = sorted(detailed_metrics_df['message_index'].unique())[:10]  # Limit to first 10 positions
+    data_for_box = [detailed_metrics_df[detailed_metrics_df['message_index'] == pos]['duration_ms'] / 1000
+                    for pos in positions_to_plot]
+    ax2.boxplot(data_for_box, labels=positions_to_plot)
+    ax2.set_xlabel('Message Position in Conversation')
+    ax2.set_ylabel('Response Time (seconds)')
+    ax2.set_title('Latency Distribution by Message Position')
+    ax2.grid(True, alpha=0.3, axis='y')
+
+    # 3. Success rate by message position
+    ax3 = axes[1, 0]
+    ax3.bar(position_stats.index, position_stats['success_rate'], color='green', alpha=0.7, edgecolor='black')
+    ax3.set_xlabel('Message Position in Conversation')
+    ax3.set_ylabel('Success Rate (%)')
+    ax3.set_title('Success Rate by Message Position')
+    ax3.set_ylim([0, 105])
+    ax3.axhline(95, color='red', linestyle='--', alpha=0.5, label='95% threshold')
+    ax3.legend()
+    ax3.grid(True, alpha=0.3, axis='y')
+    ax3.set_xticks(position_stats.index)
+
+    # 4. Conversation length distribution
+    ax4 = axes[1, 1]
+    conversation_lengths = detailed_metrics_df.groupby('source_conversation_id')['message_index'].max() + 1
+    ax4.hist(conversation_lengths, bins=range(1, int(conversation_lengths.max()) + 2),
+             edgecolor='black', alpha=0.7, color='purple')
+    ax4.set_xlabel('Number of Messages in Conversation')
+    ax4.set_ylabel('Number of Conversations')
+    ax4.set_title('Conversation Length Distribution')
+    ax4.axvline(conversation_lengths.median(), color='red', linestyle='--',
+                label=f'Median: {conversation_lengths.median():.0f}')
+    ax4.legend()
+    ax4.grid(True, alpha=0.3, axis='y')
+
+    plt.tight_layout()
+    fig.savefig(images_dir / "conversation_context_analysis.png", dpi=150, bbox_inches='tight')
+    print(f"\nSaved: {images_dir / 'conversation_context_analysis.png'}")
+    plt.show()
+
+    # Key insights summary
+    print("\n" + "=" * 60)
+    print("KEY INSIGHTS")
+    print("=" * 60)
+
+    # Check for latency degradation across conversation
+    if len(position_stats) >= 2:
+        first_msg_latency = position_stats.loc[0, 'mean_s']
+        last_msg_latency = position_stats.iloc[-1]['mean_s']
+        latency_change = ((last_msg_latency - first_msg_latency) / first_msg_latency) * 100
+
+        print(f"\nLatency Trend Across Conversation:")
+        print(f"  First message avg: {first_msg_latency:.2f}s")
+        print(f"  Last position avg: {last_msg_latency:.2f}s")
+        if abs(latency_change) > 20:
+            trend = "increases" if latency_change > 0 else "decreases"
+            print(f"  ⚠️  Latency {trend} by {abs(latency_change):.1f}% across conversation")
+        else:
+            print(f"  ✓ Latency is stable across conversation positions (change: {latency_change:.1f}%)")
+
+    # Check for success rate degradation
+    first_msg_success = position_stats.loc[0, 'success_rate']
+    last_msg_success = position_stats.iloc[-1]['success_rate']
+    if last_msg_success < first_msg_success - 5:
+        print(f"\n⚠️  Success rate decreases in later messages:")
+        print(f"    First: {first_msg_success:.1f}% → Last: {last_msg_success:.1f}%")
+    else:
+        print(f"\n✓ Success rate is consistent across conversation positions")
+
+    # Conversation length insights
+    short_conversations = (conversation_lengths <= 2).sum()
+    medium_conversations = ((conversation_lengths > 2) & (conversation_lengths <= 5)).sum()
+    long_conversations = (conversation_lengths > 5).sum()
+
+    print(f"\nConversation Length Breakdown:")
+    print(f"  Short (1-2 messages): {short_conversations} ({short_conversations/len(conversation_lengths)*100:.1f}%)")
+    print(f"  Medium (3-5 messages): {medium_conversations} ({medium_conversations/len(conversation_lengths)*100:.1f}%)")
+    print(f"  Long (6+ messages): {long_conversations} ({long_conversations/len(conversation_lengths)*100:.1f}%)")
+
+else:
+    print("No message_index data available for conversation analysis")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## SQL Complexity Analysis
+# MAGIC
+# MAGIC **What it shows:** Analysis of the SQL queries generated by Genie, including complexity metrics,
+# MAGIC patterns, and correlation between SQL characteristics and response time.
+# MAGIC
+# MAGIC **Why it matters:** Genie's core capability is generating SQL from natural language. Understanding
+# MAGIC SQL generation patterns is critical for:
+# MAGIC - **Prompt Engineering**: Identify which prompts produce complex/slow SQL
+# MAGIC - **Performance Optimization**: Find SQL patterns that cause bottlenecks
+# MAGIC - **Genie Configuration**: Optimize instructions and examples in the Genie space
+# MAGIC - **Failure Analysis**: Determine if certain SQL patterns fail more often
+# MAGIC
+# MAGIC **Key insights to look for:**
+# MAGIC - **Complexity vs Latency**: Do longer/more complex queries take longer?
+# MAGIC - **Function Call Performance**: Are Genie-generated functions slower than standard SQL?
+# MAGIC - **Empty SQL Rate**: What percentage of requests generate no SQL (non-query responses)?
+# MAGIC - **Common Patterns**: What SQL operations does Genie use most?
+# MAGIC
+# MAGIC **Analysis impact:** Use this to:
+# MAGIC - Identify prompts that need rewriting to generate simpler SQL
+# MAGIC - Optimize Genie space instructions to guide better SQL generation
+# MAGIC - Find opportunities to create additional Genie functions for common patterns
+# MAGIC - Detect if Genie is generating unnecessarily complex queries
+# MAGIC - Guide database indexing and optimization efforts
+
+# COMMAND ----------
+
+if not detailed_metrics_df.empty and 'sql' in detailed_metrics_df.columns:
+    print("=" * 70)
+    print("SQL COMPLEXITY ANALYSIS")
+    print("=" * 70)
+
+    # Create a copy for SQL analysis
+    sql_df = detailed_metrics_df.copy()
+
+    # Calculate SQL metrics
+    sql_df['has_sql'] = sql_df['sql'].notna() & (sql_df['sql'] != '')
+    sql_df['sql_length'] = sql_df['sql'].fillna('').str.len()
+    sql_df['is_function_call'] = sql_df['sql'].fillna('').str.contains(r'genie_\w+\(', regex=True, case=False)
+
+    # Count SQL operations (case-insensitive)
+    sql_df['num_joins'] = sql_df['sql'].fillna('').str.upper().str.count(r'\bJOIN\b')
+    sql_df['num_group_by'] = sql_df['sql'].fillna('').str.upper().str.count(r'\bGROUP BY\b')
+    sql_df['num_order_by'] = sql_df['sql'].fillna('').str.upper().str.count(r'\bORDER BY\b')
+    sql_df['num_where'] = sql_df['sql'].fillna('').str.upper().str.count(r'\bWHERE\b')
+    sql_df['num_subqueries'] = sql_df['sql'].fillna('').str.count(r'\(SELECT', flags=2)  # Case-insensitive
+
+    # Complexity score (simple heuristic)
+    sql_df['complexity_score'] = (
+        sql_df['num_joins'] * 2 +
+        sql_df['num_group_by'] * 2 +
+        sql_df['num_subqueries'] * 3 +
+        sql_df['num_where'] * 1 +
+        (sql_df['sql_length'] / 100)
+    )
+
+    # Categorize complexity
+    def categorize_complexity(score):
+        if score == 0:
+            return 'No SQL'
+        elif score < 5:
+            return 'Simple'
+        elif score < 15:
+            return 'Moderate'
+        else:
+            return 'Complex'
+
+    sql_df['complexity_category'] = sql_df['complexity_score'].apply(categorize_complexity)
+
+    # Overall SQL statistics
+    total_requests = len(sql_df)
+    requests_with_sql = sql_df['has_sql'].sum()
+    function_calls = sql_df['is_function_call'].sum()
+    standard_sql = requests_with_sql - function_calls
+    no_sql = total_requests - requests_with_sql
+
+    print(f"\n{'Metric':<40} {'Value':>20}")
+    print("-" * 60)
+    print(f"{'Total Requests':<40} {total_requests:>20}")
+    print(f"{'Requests with SQL':<40} {requests_with_sql:>20} ({requests_with_sql/total_requests*100:.1f}%)")
+    print(f"{'  - Function Calls':<40} {function_calls:>20} ({function_calls/total_requests*100:.1f}%)")
+    print(f"{'  - Standard SQL':<40} {standard_sql:>20} ({standard_sql/total_requests*100:.1f}%)")
+    print(f"{'No SQL Generated':<40} {no_sql:>20} ({no_sql/total_requests*100:.1f}%)")
+
+    # SQL complexity statistics (for requests with SQL)
+    if requests_with_sql > 0:
+        sql_only = sql_df[sql_df['has_sql']]
+
+        print(f"\n{'SQL Complexity Metrics':<40} {'Value':>20}")
+        print("-" * 60)
+        print(f"{'Avg SQL Length (characters)':<40} {sql_only['sql_length'].mean():>20.0f}")
+        print(f"{'Median SQL Length':<40} {sql_only['sql_length'].median():>20.0f}")
+        print(f"{'Max SQL Length':<40} {sql_only['sql_length'].max():>20.0f}")
+        print(f"{'Avg JOINs per query':<40} {sql_only['num_joins'].mean():>20.2f}")
+        print(f"{'Avg GROUP BYs per query':<40} {sql_only['num_group_by'].mean():>20.2f}")
+        print(f"{'Queries with subqueries':<40} {(sql_only['num_subqueries'] > 0).sum():>20}")
+
+        # Complexity distribution
+        print(f"\n{'Complexity Distribution':<40} {'Count':>15} {'%':>10}")
+        print("-" * 65)
+        for category in ['No SQL', 'Simple', 'Moderate', 'Complex']:
+            count = (sql_df['complexity_category'] == category).sum()
+            pct = count / total_requests * 100
+            print(f"{category:<40} {count:>15} {pct:>9.1f}%")
+
+        # Performance by SQL type
+        print("\n" + "=" * 60)
+        print("PERFORMANCE BY SQL TYPE")
+        print("=" * 60)
+
+        type_stats = []
+
+        # Function calls
+        if function_calls > 0:
+            func_data = sql_df[sql_df['is_function_call']]
+            type_stats.append({
+                'type': 'Function Call',
+                'count': len(func_data),
+                'mean_s': (func_data['duration_ms'].mean() / 1000),
+                'median_s': (func_data['duration_ms'].median() / 1000),
+                'success_rate': func_data['success'].mean() * 100
+            })
+
+        # Standard SQL
+        if standard_sql > 0:
+            std_data = sql_df[sql_df['has_sql'] & ~sql_df['is_function_call']]
+            type_stats.append({
+                'type': 'Standard SQL',
+                'count': len(std_data),
+                'mean_s': (std_data['duration_ms'].mean() / 1000),
+                'median_s': (std_data['duration_ms'].median() / 1000),
+                'success_rate': std_data['success'].mean() * 100
+            })
+
+        # No SQL
+        if no_sql > 0:
+            no_sql_data = sql_df[~sql_df['has_sql']]
+            type_stats.append({
+                'type': 'No SQL',
+                'count': len(no_sql_data),
+                'mean_s': (no_sql_data['duration_ms'].mean() / 1000),
+                'median_s': (no_sql_data['duration_ms'].median() / 1000),
+                'success_rate': no_sql_data['success'].mean() * 100
+            })
+
+        type_stats_df = pd.DataFrame(type_stats)
+        display(type_stats_df)
+
+        # Performance by complexity
+        print("\n" + "=" * 60)
+        print("PERFORMANCE BY COMPLEXITY LEVEL")
+        print("=" * 60)
+
+        complexity_stats = sql_df.groupby('complexity_category').agg({
+            'duration_ms': ['count', 'mean', 'median'],
+            'success': 'mean'
+        }).round(2)
+
+        complexity_stats.columns = ['count', 'mean_ms', 'median_ms', 'success_rate']
+        complexity_stats['mean_s'] = (complexity_stats['mean_ms'] / 1000).round(2)
+        complexity_stats['median_s'] = (complexity_stats['median_ms'] / 1000).round(2)
+        complexity_stats['success_rate'] = (complexity_stats['success_rate'] * 100).round(1)
+
+        # Reorder to logical progression
+        category_order = ['No SQL', 'Simple', 'Moderate', 'Complex']
+        complexity_stats = complexity_stats.reindex([c for c in category_order if c in complexity_stats.index])
+
+        display(complexity_stats[['count', 'mean_s', 'median_s', 'success_rate']])
+
+        # Visualizations
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+
+        # 1. SQL length vs latency scatter plot
+        ax1 = axes[0, 0]
+        sql_with_data = sql_df[sql_df['has_sql']]
+        scatter = ax1.scatter(sql_with_data['sql_length'],
+                             sql_with_data['duration_ms'] / 1000,
+                             alpha=0.5, s=30)
+        ax1.set_xlabel('SQL Length (characters)')
+        ax1.set_ylabel('Response Time (seconds)')
+        ax1.set_title('SQL Length vs Response Time')
+        ax1.grid(True, alpha=0.3)
+
+        # Add trend line
+        if len(sql_with_data) > 1:
+            z = np.polyfit(sql_with_data['sql_length'], sql_with_data['duration_ms'] / 1000, 1)
+            p = np.poly1d(z)
+            ax1.plot(sql_with_data['sql_length'].sort_values(),
+                    p(sql_with_data['sql_length'].sort_values()),
+                    "r--", alpha=0.8, label=f'Trend: y={z[0]:.4f}x+{z[1]:.2f}')
+            ax1.legend()
+
+        # 2. Latency by complexity category
+        ax2 = axes[0, 1]
+        complexity_plot_data = [sql_df[sql_df['complexity_category'] == cat]['duration_ms'] / 1000
+                               for cat in category_order if cat in sql_df['complexity_category'].values]
+        complexity_labels = [cat for cat in category_order if cat in sql_df['complexity_category'].values]
+        ax2.boxplot(complexity_plot_data, labels=complexity_labels)
+        ax2.set_xlabel('Complexity Category')
+        ax2.set_ylabel('Response Time (seconds)')
+        ax2.set_title('Latency by SQL Complexity')
+        ax2.grid(True, alpha=0.3, axis='y')
+        plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45, ha='right')
+
+        # 3. SQL type distribution pie chart
+        ax3 = axes[1, 0]
+        type_counts = [function_calls, standard_sql, no_sql]
+        type_labels = [f'Function Call\n({function_calls})',
+                      f'Standard SQL\n({standard_sql})',
+                      f'No SQL\n({no_sql})']
+        colors = ['#ff9999', '#66b3ff', '#99ff99']
+        ax3.pie([c for c in type_counts if c > 0],
+               labels=[l for l, c in zip(type_labels, type_counts) if c > 0],
+               colors=[col for col, c in zip(colors, type_counts) if c > 0],
+               autopct='%1.1f%%', startangle=90)
+        ax3.set_title('SQL Type Distribution')
+
+        # 4. Complexity score distribution
+        ax4 = axes[1, 1]
+        sql_with_score = sql_df[sql_df['has_sql']]
+        if len(sql_with_score) > 0:
+            ax4.hist(sql_with_score['complexity_score'], bins=30, edgecolor='black', alpha=0.7, color='coral')
+            ax4.set_xlabel('Complexity Score')
+            ax4.set_ylabel('Number of Queries')
+            ax4.set_title('SQL Complexity Score Distribution')
+            ax4.axvline(sql_with_score['complexity_score'].median(), color='red', linestyle='--',
+                       label=f'Median: {sql_with_score["complexity_score"].median():.1f}')
+            ax4.legend()
+            ax4.grid(True, alpha=0.3, axis='y')
+
+        plt.tight_layout()
+        fig.savefig(images_dir / "sql_complexity_analysis.png", dpi=150, bbox_inches='tight')
+        print(f"\nSaved: {images_dir / 'sql_complexity_analysis.png'}")
+        plt.show()
+
+        # Key insights
+        print("\n" + "=" * 60)
+        print("KEY INSIGHTS")
+        print("=" * 60)
+
+        # Correlation between length and latency
+        if len(sql_with_data) > 1:
+            correlation = sql_with_data['sql_length'].corr(sql_with_data['duration_ms'])
+            print(f"\nSQL Length vs Latency Correlation: {correlation:.3f}")
+            if correlation > 0.5:
+                print("  ⚠️  Strong positive correlation - longer SQL queries are significantly slower")
+            elif correlation > 0.3:
+                print("  ⚡ Moderate correlation - SQL length has some impact on latency")
+            else:
+                print("  ✓ Weak correlation - SQL length is not a major factor in latency")
+
+        # Compare function calls vs standard SQL
+        if function_calls > 0 and standard_sql > 0:
+            func_avg = sql_df[sql_df['is_function_call']]['duration_ms'].mean() / 1000
+            std_avg = sql_df[sql_df['has_sql'] & ~sql_df['is_function_call']]['duration_ms'].mean() / 1000
+            diff_pct = ((func_avg - std_avg) / std_avg) * 100 if std_avg > 0 else 0
+
+            print(f"\nFunction Calls vs Standard SQL:")
+            print(f"  Function calls avg: {func_avg:.2f}s")
+            print(f"  Standard SQL avg: {std_avg:.2f}s")
+            if abs(diff_pct) > 20:
+                comparison = "slower" if diff_pct > 0 else "faster"
+                print(f"  ⚠️  Function calls are {abs(diff_pct):.1f}% {comparison} than standard SQL")
+            else:
+                print(f"  ✓ Performance is similar (diff: {diff_pct:.1f}%)")
+
+        # Complexity impact
+        if 'Complex' in complexity_stats.index and 'Simple' in complexity_stats.index:
+            complex_avg = complexity_stats.loc['Complex', 'mean_s']
+            simple_avg = complexity_stats.loc['Simple', 'mean_s']
+            complexity_impact = ((complex_avg - simple_avg) / simple_avg) * 100 if simple_avg > 0 else 0
+
+            print(f"\nComplexity Impact:")
+            print(f"  Simple queries avg: {simple_avg:.2f}s")
+            print(f"  Complex queries avg: {complex_avg:.2f}s")
+            if complexity_impact > 50:
+                print(f"  ⚠️  Complex queries are {complexity_impact:.1f}% slower - consider prompt optimization")
+            else:
+                print(f"  ✓ Complexity impact is manageable ({complexity_impact:.1f}%)")
+
+else:
+    print("No SQL data available for analysis")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Concurrency Impact Analysis
+# MAGIC
+# MAGIC **What it shows:** How Genie's performance changes as the number of concurrent users increases.
+# MAGIC This analysis tracks latency percentiles (P50, P90, P99) and throughput as load scales up.
+# MAGIC
+# MAGIC **Why it matters:** Understanding concurrency impact is critical for:
+# MAGIC - **Capacity Planning**: Determine how many users your Genie deployment can handle
+# MAGIC - **Resource Allocation**: Decide if you need to scale compute resources
+# MAGIC - **SLA Definition**: Set realistic response time expectations under load
+# MAGIC - **Cost Optimization**: Find the sweet spot between performance and cost
+# MAGIC
+# MAGIC **Key insights to look for:**
+# MAGIC - **Linear degradation**: Latency increases proportionally with users (manageable, predictable)
+# MAGIC - **Exponential degradation**: Latency spikes rapidly beyond certain concurrency (bottleneck)
+# MAGIC - **Flat performance**: System handles additional users well (good scaling)
+# MAGIC - **Throughput per user**: Does efficiency decrease as you add more users?
+# MAGIC
+# MAGIC **Analysis impact:** Use this to:
+# MAGIC - Determine maximum concurrent users before performance degrades unacceptably
+# MAGIC - Identify the "knee" in the performance curve where scaling becomes inefficient
+# MAGIC - Justify infrastructure scaling decisions with data
+# MAGIC - Set capacity alerts and auto-scaling thresholds
+# MAGIC - Calculate the cost per user at different concurrency levels
+
+# COMMAND ----------
+
+import numpy as np
+
+if not detailed_metrics_df.empty and 'concurrent_users' in detailed_metrics_df.columns:
+    print("=" * 70)
+    print("CONCURRENCY IMPACT ANALYSIS")
+    print("=" * 70)
+
+    # Group by concurrent users and calculate metrics
+    concurrency_stats = detailed_metrics_df.groupby('concurrent_users').agg({
+        'duration_ms': ['count', 'mean', 'median',
+                       lambda x: x.quantile(0.90),
+                       lambda x: x.quantile(0.95),
+                       lambda x: x.quantile(0.99)],
+        'success': 'mean'
+    }).round(2)
+
+    concurrency_stats.columns = ['count', 'mean_ms', 'median_ms', 'p90_ms', 'p95_ms', 'p99_ms', 'success_rate']
+
+    # Convert to seconds
+    for col in ['mean_ms', 'median_ms', 'p90_ms', 'p95_ms', 'p99_ms']:
+        concurrency_stats[col.replace('_ms', '_s')] = (concurrency_stats[col] / 1000).round(2)
+
+    concurrency_stats['success_rate'] = (concurrency_stats['success_rate'] * 100).round(1)
+
+    # Calculate efficiency metrics
+    # Note: This is a simplified calculation - actual test duration would be needed for precise throughput
+    concurrency_stats['requests_per_user'] = concurrency_stats['count'] / concurrency_stats.index
+
+    print(f"\n{'Concurrent Users':<15} {'Requests':<10} {'Mean (s)':<10} {'P50 (s)':<10} {'P90 (s)':<10} {'P95 (s)':<10} {'P99 (s)':<10} {'Success %':<10}")
+    print("-" * 105)
+    for idx, row in concurrency_stats.iterrows():
+        print(f"{idx:<15} {int(row['count']):<10} {row['mean_s']:<10.2f} {row['median_s']:<10.2f} "
+              f"{row['p90_s']:<10.2f} {row['p95_s']:<10.2f} {row['p99_s']:<10.2f} {row['success_rate']:<10.1f}")
+
+    # Visualizations
+    fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+
+    # 1. Latency percentiles vs concurrent users
+    ax1 = axes[0, 0]
+    ax1.plot(concurrency_stats.index, concurrency_stats['median_s'],
+            marker='o', linewidth=2, markersize=8, label='P50 (Median)', color='blue')
+    ax1.plot(concurrency_stats.index, concurrency_stats['p90_s'],
+            marker='s', linewidth=2, markersize=6, label='P90', color='orange')
+    ax1.plot(concurrency_stats.index, concurrency_stats['p95_s'],
+            marker='^', linewidth=2, markersize=6, label='P95', color='red')
+    ax1.plot(concurrency_stats.index, concurrency_stats['p99_s'],
+            marker='d', linewidth=2, markersize=6, label='P99', color='darkred')
+    ax1.set_xlabel('Concurrent Users')
+    ax1.set_ylabel('Response Time (seconds)')
+    ax1.set_title('Latency Percentiles vs Concurrent Users')
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+
+    # 2. Box plot by concurrent users
+    ax2 = axes[0, 1]
+    concurrent_user_levels = sorted(detailed_metrics_df['concurrent_users'].unique())
+    box_data = [detailed_metrics_df[detailed_metrics_df['concurrent_users'] == level]['duration_ms'] / 1000
+                for level in concurrent_user_levels]
+    ax2.boxplot(box_data, labels=concurrent_user_levels)
+    ax2.set_xlabel('Concurrent Users')
+    ax2.set_ylabel('Response Time (seconds)')
+    ax2.set_title('Latency Distribution by Concurrent Users')
+    ax2.grid(True, alpha=0.3, axis='y')
+
+    # 3. Success rate vs concurrent users
+    ax3 = axes[1, 0]
+    ax3.plot(concurrency_stats.index, concurrency_stats['success_rate'],
+            marker='o', linewidth=2, markersize=8, color='green')
+    ax3.set_xlabel('Concurrent Users')
+    ax3.set_ylabel('Success Rate (%)')
+    ax3.set_title('Success Rate vs Concurrent Users')
+    ax3.set_ylim([0, 105])
+    ax3.axhline(95, color='red', linestyle='--', alpha=0.5, label='95% threshold')
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
+
+    # 4. Degradation factor (normalized to single user baseline)
+    ax4 = axes[1, 1]
+    if len(concurrency_stats) > 1:
+        baseline_latency = concurrency_stats.iloc[0]['median_s']
+        degradation_factor = concurrency_stats['median_s'] / baseline_latency
+
+        ax4.plot(concurrency_stats.index, degradation_factor,
+                marker='o', linewidth=2, markersize=8, color='purple')
+        ax4.axhline(1.0, color='gray', linestyle='--', alpha=0.5, label='Baseline (1x)')
+        ax4.set_xlabel('Concurrent Users')
+        ax4.set_ylabel('Latency Degradation Factor')
+        ax4.set_title('Performance Degradation vs Baseline')
+        ax4.legend()
+        ax4.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    fig.savefig(images_dir / "concurrency_impact_analysis.png", dpi=150, bbox_inches='tight')
+    print(f"\nSaved: {images_dir / 'concurrency_impact_analysis.png'}")
+    plt.show()
+
+    # Key insights
+    print("\n" + "=" * 60)
+    print("KEY INSIGHTS")
+    print("=" * 60)
+
+    if len(concurrency_stats) > 1:
+        # Calculate degradation from lowest to highest concurrency
+        min_users = concurrency_stats.index.min()
+        max_users = concurrency_stats.index.max()
+
+        baseline_p50 = concurrency_stats.loc[min_users, 'median_s']
+        max_load_p50 = concurrency_stats.loc[max_users, 'median_s']
+
+        baseline_p99 = concurrency_stats.loc[min_users, 'p99_s']
+        max_load_p99 = concurrency_stats.loc[max_users, 'p99_s']
+
+        p50_degradation = ((max_load_p50 - baseline_p50) / baseline_p50) * 100 if baseline_p50 > 0 else 0
+        p99_degradation = ((max_load_p99 - baseline_p99) / baseline_p99) * 100 if baseline_p99 > 0 else 0
+
+        print(f"\nPerformance Degradation ({min_users} → {max_users} users):")
+        print(f"  P50 (Median): {baseline_p50:.2f}s → {max_load_p50:.2f}s ({p50_degradation:+.1f}%)")
+        print(f"  P99: {baseline_p99:.2f}s → {max_load_p99:.2f}s ({p99_degradation:+.1f}%)")
+
+        if p50_degradation > 100:
+            print(f"\n  ⚠️  CRITICAL: Median latency more than doubles under load")
+            print(f"      System may not be suitable for {max_users} concurrent users")
+        elif p50_degradation > 50:
+            print(f"\n  ⚠️  WARNING: Significant performance degradation under load")
+            print(f"      Consider scaling compute resources")
+        elif p50_degradation > 25:
+            print(f"\n  ⚡ MODERATE: Noticeable performance impact")
+            print(f"      Performance is acceptable but monitor closely")
+        else:
+            print(f"\n  ✓ GOOD: System scales well with additional users")
+
+        # Per-user degradation rate
+        per_user_degradation = p50_degradation / (max_users - min_users) if max_users > min_users else 0
+        print(f"\n  Degradation per additional user: ~{per_user_degradation:.1f}%")
+
+        # Success rate impact
+        baseline_success = concurrency_stats.loc[min_users, 'success_rate']
+        max_load_success = concurrency_stats.loc[max_users, 'success_rate']
+        success_change = max_load_success - baseline_success
+
+        if success_change < -5:
+            print(f"\n  ⚠️  Success rate drops under load: {baseline_success:.1f}% → {max_load_success:.1f}%")
+        else:
+            print(f"\n  ✓ Success rate remains stable: {baseline_success:.1f}% → {max_load_success:.1f}%")
+
+        # Calculate theoretical maximum capacity
+        # Assuming acceptable degradation is 2x baseline latency
+        if p50_degradation > 0 and max_users > min_users:
+            acceptable_degradation_pct = 100  # 2x baseline = 100% increase
+            estimated_max_users = min_users + (acceptable_degradation_pct / per_user_degradation) if per_user_degradation > 0 else max_users
+
+            print(f"\n  Estimated capacity at 2x baseline latency: ~{int(estimated_max_users)} concurrent users")
+
+    else:
+        print("\nInsufficient concurrency data points for degradation analysis")
+        print("Run tests with multiple concurrency levels (e.g., 1, 5, 10, 20 users)")
+
+else:
+    print("No concurrent_users data available for analysis")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Error Deep Dive
+# MAGIC
+# MAGIC **What it shows:** Comprehensive analysis of errors and failures, including categorization,
+# MAGIC patterns, temporal distribution, and identification of problematic prompts.
+# MAGIC
+# MAGIC **Why it matters:** Even small error rates can indicate systemic issues. Understanding error patterns is critical for:
+# MAGIC - **System Reliability**: Identify and fix root causes of failures
+# MAGIC - **User Experience**: Errors frustrate users and reduce trust in Genie
+# MAGIC - **Prompt Engineering**: Find prompts that consistently fail and need improvement
+# MAGIC - **Infrastructure Issues**: Detect timeouts, rate limiting, or resource constraints
+# MAGIC
+# MAGIC **Key insights to look for:**
+# MAGIC - **Error clustering**: Do errors happen at specific times or under specific conditions?
+# MAGIC - **Prompt-specific failures**: Are certain queries failing consistently?
+# MAGIC - **Error types**: What's causing failures (timeout, auth, invalid SQL, etc.)?
+# MAGIC - **Correlation with load**: Do errors increase with concurrent users?
+# MAGIC
+# MAGIC **Analysis impact:** Use this to:
+# MAGIC - Prioritize bug fixes based on error frequency and impact
+# MAGIC - Identify prompts that need rewriting or additional Genie instructions
+# MAGIC - Detect infrastructure issues (timeouts, memory, rate limits)
+# MAGIC - Set up monitoring and alerting for specific error patterns
+# MAGIC - Improve Genie space configuration to handle edge cases
+
+# COMMAND ----------
+
+if not detailed_metrics_df.empty:
+    print("=" * 70)
+    print("ERROR DEEP DIVE")
+    print("=" * 70)
+
+    # Overall error statistics
+    total_requests = len(detailed_metrics_df)
+    failed_requests = (~detailed_metrics_df['success']).sum()
+    error_rate = (failed_requests / total_requests) * 100 if total_requests > 0 else 0
+
+    print(f"\n{'Metric':<40} {'Value':>20}")
+    print("-" * 60)
+    print(f"{'Total Requests':<40} {total_requests:>20}")
+    print(f"{'Failed Requests':<40} {failed_requests:>20}")
+    print(f"{'Error Rate':<40} {f'{error_rate:.2f}%':>20}")
+
+    if failed_requests > 0:
+        errors_df = detailed_metrics_df[~detailed_metrics_df['success']].copy()
+
+        # Error categorization
+        print("\n" + "=" * 60)
+        print("ERROR CATEGORIZATION")
+        print("=" * 60)
+
+        # Extract error types from error messages
+        def categorize_error(error_msg):
+            if pd.isna(error_msg) or error_msg == '':
+                return 'Unknown Error'
+            error_lower = str(error_msg).lower()
+
+            if 'timeout' in error_lower or 'timed out' in error_lower:
+                return 'Timeout'
+            elif 'rate limit' in error_lower or '429' in error_lower:
+                return 'Rate Limit'
+            elif 'auth' in error_lower or '401' in error_lower or '403' in error_lower:
+                return 'Authentication/Authorization'
+            elif '500' in error_lower or '502' in error_lower or '503' in error_lower:
+                return 'Server Error (5xx)'
+            elif '400' in error_lower or 'bad request' in error_lower:
+                return 'Bad Request (4xx)'
+            elif 'sql' in error_lower or 'syntax' in error_lower:
+                return 'SQL Generation Error'
+            elif 'connection' in error_lower or 'network' in error_lower:
+                return 'Connection Error'
+            else:
+                return 'Other Error'
+
+        errors_df['error_category'] = errors_df['error'].apply(categorize_error)
+
+        error_counts = errors_df['error_category'].value_counts()
+        print(f"\n{'Error Type':<35} {'Count':<10} {'% of Errors':<15} {'% of Total':<15}")
+        print("-" * 75)
+        for error_type, count in error_counts.items():
+            pct_of_errors = (count / failed_requests) * 100
+            pct_of_total = (count / total_requests) * 100
+            print(f"{error_type:<35} {count:<10} {pct_of_errors:>13.1f}% {pct_of_total:>14.2f}%")
+
+        # Temporal error analysis
+        print("\n" + "=" * 60)
+        print("TEMPORAL ERROR DISTRIBUTION")
+        print("=" * 60)
+
+        if 'request_started_at' in errors_df.columns:
+            errors_df['request_started_at'] = pd.to_datetime(errors_df['request_started_at'])
+            detailed_metrics_df['request_started_at'] = pd.to_datetime(detailed_metrics_df['request_started_at'])
+
+            # Calculate error rate over time (using 1-minute windows)
+            detailed_metrics_df['time_window'] = detailed_metrics_df['request_started_at'].dt.floor('1min')
+            errors_df['time_window'] = errors_df['request_started_at'].dt.floor('1min')
+
+            error_rate_over_time = detailed_metrics_df.groupby('time_window').agg({
+                'success': ['count', lambda x: (~x).sum()]
+            })
+            error_rate_over_time.columns = ['total', 'failures']
+            error_rate_over_time['error_rate_pct'] = (error_rate_over_time['failures'] / error_rate_over_time['total']) * 100
+
+            print(f"\nError rate by time window:")
+            print(f"  Mean error rate: {error_rate_over_time['error_rate_pct'].mean():.2f}%")
+            print(f"  Max error rate: {error_rate_over_time['error_rate_pct'].max():.2f}%")
+            print(f"  Windows with errors: {(error_rate_over_time['failures'] > 0).sum()} / {len(error_rate_over_time)}")
+
+        # Errors by prompt
+        print("\n" + "=" * 60)
+        print("ERRORS BY PROMPT")
+        print("=" * 60)
+
+        if 'prompt' in errors_df.columns:
+            prompt_errors = errors_df.groupby('prompt').size().sort_values(ascending=False)
+
+            # Calculate failure rate per prompt
+            prompt_stats = detailed_metrics_df.groupby('prompt').agg({
+                'success': ['count', lambda x: (~x).sum(), 'mean']
+            })
+            prompt_stats.columns = ['total_requests', 'failures', 'success_rate']
+            prompt_stats['failure_rate_pct'] = ((1 - prompt_stats['success_rate']) * 100).round(1)
+            prompt_stats = prompt_stats[prompt_stats['failures'] > 0].sort_values('failures', ascending=False)
+
+            print(f"\nTop 10 prompts with most failures:")
+            display(prompt_stats[['total_requests', 'failures', 'failure_rate_pct']].head(10))
+
+            # Identify prompts with 100% failure rate
+            always_failing = prompt_stats[prompt_stats['success_rate'] == 0]
+            if len(always_failing) > 0:
+                print(f"\n⚠️  {len(always_failing)} prompt(s) have 100% failure rate:")
+                display(always_failing[['total_requests', 'failures']])
+
+        # Errors by user
+        if 'user' in errors_df.columns:
+            print("\n" + "=" * 60)
+            print("ERRORS BY USER")
+            print("=" * 60)
+
+            user_errors = detailed_metrics_df.groupby('user').agg({
+                'success': ['count', lambda x: (~x).sum(), 'mean']
+            })
+            user_errors.columns = ['total_requests', 'failures', 'success_rate']
+            user_errors['failure_rate_pct'] = ((1 - user_errors['success_rate']) * 100).round(1)
+            user_errors = user_errors[user_errors['failures'] > 0].sort_values('failures', ascending=False)
+
+            if len(user_errors) > 0:
+                print(f"\nUsers with errors:")
+                display(user_errors)
+
+        # Errors by concurrency
+        if 'concurrent_users' in errors_df.columns:
+            print("\n" + "=" * 60)
+            print("ERRORS BY CONCURRENCY LEVEL")
+            print("=" * 60)
+
+            concurrency_errors = detailed_metrics_df.groupby('concurrent_users').agg({
+                'success': ['count', lambda x: (~x).sum(), 'mean']
+            })
+            concurrency_errors.columns = ['total_requests', 'failures', 'success_rate']
+            concurrency_errors['failure_rate_pct'] = ((1 - concurrency_errors['success_rate']) * 100).round(1)
+
+            display(concurrency_errors)
+
+        # Visualizations
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+
+        # 1. Error type distribution (pie chart)
+        ax1 = axes[0, 0]
+        if len(error_counts) > 0:
+            colors = plt.cm.Set3(range(len(error_counts)))
+            ax1.pie(error_counts.values, labels=error_counts.index, autopct='%1.1f%%',
+                   startangle=90, colors=colors)
+            ax1.set_title(f'Error Type Distribution ({failed_requests} total errors)')
+
+        # 2. Errors over time
+        ax2 = axes[0, 1]
+        if 'request_started_at' in errors_df.columns and len(errors_df) > 0:
+            # Plot all requests with errors highlighted
+            all_times = detailed_metrics_df['request_started_at']
+            all_success = detailed_metrics_df['success']
+
+            success_times = all_times[all_success]
+            error_times = all_times[~all_success]
+
+            # Create timeline scatter
+            ax2.scatter(success_times, [1]*len(success_times), alpha=0.3, s=20, c='green', label='Success')
+            ax2.scatter(error_times, [1]*len(error_times), alpha=0.8, s=50, c='red', marker='x', label='Error')
+            ax2.set_xlabel('Time')
+            ax2.set_yticks([])
+            ax2.set_title('Error Timeline')
+            ax2.legend()
+            ax2.grid(True, alpha=0.3, axis='x')
+
+        # 3. Error rate by concurrent users
+        ax3 = axes[1, 0]
+        if 'concurrent_users' in errors_df.columns and len(concurrency_errors) > 0:
+            ax3.bar(concurrency_errors.index, concurrency_errors['failure_rate_pct'],
+                   alpha=0.7, color='red', edgecolor='black')
+            ax3.set_xlabel('Concurrent Users')
+            ax3.set_ylabel('Failure Rate (%)')
+            ax3.set_title('Failure Rate by Concurrency Level')
+            ax3.axhline(5, color='orange', linestyle='--', alpha=0.5, label='5% threshold')
+            ax3.legend()
+            ax3.grid(True, alpha=0.3, axis='y')
+
+        # 4. Top failing prompts
+        ax4 = axes[1, 1]
+        if 'prompt' in errors_df.columns and len(prompt_stats) > 0:
+            top_failing = prompt_stats.head(10)
+            labels = [p[:40] + '...' if len(p) > 40 else p for p in top_failing.index]
+
+            bars = ax4.barh(range(len(top_failing)), top_failing['failures'],
+                           alpha=0.7, color='darkred', edgecolor='black')
+            ax4.set_yticks(range(len(top_failing)))
+            ax4.set_yticklabels(labels, fontsize=8)
+            ax4.set_xlabel('Number of Failures')
+            ax4.set_title('Top 10 Failing Prompts')
+            ax4.invert_yaxis()
+            ax4.grid(True, alpha=0.3, axis='x')
+
+            # Add failure rate labels
+            for i, (bar, rate) in enumerate(zip(bars, top_failing['failure_rate_pct'])):
+                ax4.text(bar.get_width() + 0.1, bar.get_y() + bar.get_height()/2,
+                        f'{rate:.1f}%', va='center', fontsize=7)
+
+        plt.tight_layout()
+        fig.savefig(images_dir / "error_deep_dive.png", dpi=150, bbox_inches='tight')
+        print(f"\nSaved: {images_dir / 'error_deep_dive.png'}")
+        plt.show()
+
+        # Key insights
+        print("\n" + "=" * 60)
+        print("KEY INSIGHTS & RECOMMENDATIONS")
+        print("=" * 60)
+
+        print(f"\nOverall Error Rate: {error_rate:.2f}%")
+        if error_rate > 10:
+            print("  🚨 CRITICAL: >10% error rate indicates serious issues")
+            print("     Action: Immediate investigation required")
+        elif error_rate > 5:
+            print("  ⚠️  WARNING: >5% error rate is concerning")
+            print("     Action: Review error patterns and optimize prompts")
+        elif error_rate > 1:
+            print("  ⚡ MODERATE: 1-5% error rate is acceptable but should be improved")
+            print("     Action: Monitor and optimize problematic prompts")
+        else:
+            print("  ✓ GOOD: <1% error rate is healthy")
+
+        # Most common error type
+        most_common_error = error_counts.index[0]
+        most_common_count = error_counts.values[0]
+        most_common_pct = (most_common_count / failed_requests) * 100
+
+        print(f"\nMost Common Error: {most_common_error} ({most_common_count} occurrences, {most_common_pct:.1f}% of errors)")
+
+        # Recommendations by error type
+        recommendations = {
+            'Timeout': '- Increase timeout settings\n- Optimize slow SQL queries\n- Check warehouse size/compute resources',
+            'Rate Limit': '- Reduce request concurrency\n- Implement backoff/retry logic\n- Check Genie API rate limits',
+            'Authentication/Authorization': '- Verify Databricks credentials\n- Check token expiration\n- Review workspace permissions',
+            'Server Error (5xx)': '- Check Genie service health\n- Review Databricks workspace status\n- Contact Databricks support if persistent',
+            'SQL Generation Error': '- Review failing prompts\n- Add examples to Genie space instructions\n- Simplify complex prompts',
+            'Connection Error': '- Check network connectivity\n- Verify workspace URL\n- Review firewall/proxy settings'
+        }
+
+        if most_common_error in recommendations:
+            print(f"\nRecommendations for {most_common_error}:")
+            print(recommendations[most_common_error])
+
+        # Prompt-specific recommendations
+        if 'prompt' in errors_df.columns and len(always_failing) > 0:
+            print(f"\n⚠️  Action Required: {len(always_failing)} prompt(s) always fail")
+            print("   These prompts need immediate attention:")
+            print("   - Review prompt phrasing")
+            print("   - Add relevant examples to Genie space")
+            print("   - Check if data exists for these queries")
+
+        # Concurrency correlation
+        if 'concurrent_users' in errors_df.columns and len(concurrency_errors) > 1:
+            error_rate_increase = concurrency_errors['failure_rate_pct'].iloc[-1] - concurrency_errors['failure_rate_pct'].iloc[0]
+            if error_rate_increase > 3:
+                print(f"\n⚠️  Error rate increases significantly with load (+{error_rate_increase:.1f}%)")
+                print("   System may not be ready for production concurrency")
+                print("   Consider: scaling compute, optimizing queries, reducing concurrency")
+
+    else:
+        print("\n✅ No errors recorded in this test run!")
+        print("   This indicates excellent system stability and prompt quality.")
+
+else:
+    print("No detailed metrics data available for error analysis")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Export to Unity Catalog
-# MAGIC 
-# MAGIC **Optional:** Export the detailed metrics to a Unity Catalog table for long-term storage, 
+# MAGIC
+# MAGIC **Optional:** Export the detailed metrics to a Unity Catalog table for long-term storage,
 # MAGIC cross-run comparison, and analysis with SQL or BI tools.
-# MAGIC 
+# MAGIC
 # MAGIC Uncomment the code below and set your catalog/schema to enable export.
 
 # COMMAND ----------
