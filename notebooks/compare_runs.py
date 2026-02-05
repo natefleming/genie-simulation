@@ -45,17 +45,31 @@ from scipy import stats
 results_base = "results"
 available_dirs = sorted(glob(f"{results_base}/genie_*"), key=lambda d: Path(d).stat().st_mtime, reverse=True)
 
+def extract_metadata_from_dirname(dir_name: str) -> dict:
+    """Extract metadata (space_id, users) from results directory name."""
+    parts = dir_name.split("_")
+    user_part = [p for p in parts if "users" in p]
+    user_info = user_part[0] if user_part else "unknown"
+    
+    # Extract space_id - it's typically the second component after the prefix
+    # Format: genie_loadtest_<space_id>_<users>users_<duration>_<timestamp>
+    space_id = "unknown"
+    if len(parts) >= 3:
+        # Check if the third part looks like a space_id (not "users" or a duration)
+        potential_space_id = parts[2]
+        if not any(x in potential_space_id.lower() for x in ["users", "s", "m", "h"]) or len(potential_space_id) > 10:
+            space_id = potential_space_id
+    
+    return {"space_id": space_id, "users": user_info}
+
 print("Available results directories (newest first):")
 print("-" * 80)
 for i, d in enumerate(available_dirs[:20]):
     dir_name = os.path.basename(d)
-    # Try to extract user count from directory name
-    parts = dir_name.split("_")
-    user_part = [p for p in parts if "users" in p]
-    user_info = user_part[0] if user_part else "unknown"
+    metadata = extract_metadata_from_dirname(dir_name)
     mtime = datetime.fromtimestamp(Path(d).stat().st_mtime).strftime("%Y-%m-%d %H:%M")
     print(f"  {i+1:2}. {dir_name}")
-    print(f"      Users: {user_info}, Modified: {mtime}")
+    print(f"      Space: {metadata['space_id']}, Users: {metadata['users']}, Modified: {mtime}")
 
 # COMMAND ----------
 
@@ -63,6 +77,7 @@ for i, d in enumerate(available_dirs[:20]):
 default_dirs = "\n".join(available_dirs[:3]) if len(available_dirs) >= 3 else "\n".join(available_dirs)
 
 dbutils.widgets.multiline("results_dirs", default_dirs, "Results Directories (one per line)")
+dbutils.widgets.text("space_id_filter", "", "Filter by Space ID (leave blank for all)")
 
 # COMMAND ----------
 
@@ -82,6 +97,13 @@ for d in results_dirs:
 
 # COMMAND ----------
 
+# Get space_id filter value
+space_id_filter = dbutils.widgets.get("space_id_filter").strip()
+if space_id_filter:
+    print(f"Filtering by space_id: {space_id_filter}")
+else:
+    print("No space_id filter applied - loading all runs")
+
 # Load detailed metrics from each directory
 dfs = []
 run_metadata = []
@@ -95,6 +117,15 @@ for dir_path in results_dirs:
         run_id = os.path.basename(dir_path)
         concurrent_users = df['concurrent_users'].iloc[0] if 'concurrent_users' in df.columns else None
         
+        # Extract space_id from data or directory name
+        if 'space_id' in df.columns:
+            space_id = df['space_id'].iloc[0]
+        else:
+            # Fallback: extract from directory name
+            dir_metadata = extract_metadata_from_dirname(run_id)
+            space_id = dir_metadata['space_id']
+            df['space_id'] = space_id
+        
         # If run_id column doesn't exist, add it
         if 'run_id' not in df.columns:
             df['run_id'] = run_id
@@ -104,13 +135,14 @@ for dir_path in results_dirs:
         run_metadata.append({
             'run_id': run_id,
             'directory': dir_path,
+            'space_id': space_id,
             'concurrent_users': concurrent_users,
             'total_requests': len(df),
             'success_rate': df['success'].mean() * 100 if 'success' in df.columns else None,
             'mean_duration_s': df['duration_ms'].mean() / 1000 if 'duration_ms' in df.columns else None,
         })
         
-        print(f"✓ Loaded {len(df)} records from {run_id}")
+        print(f"✓ Loaded {len(df)} records from {run_id} (space: {space_id})")
     else:
         print(f"✗ No detailed_metrics.csv found in {dir_path}")
 
@@ -121,8 +153,21 @@ if not dfs:
 combined_df = pd.concat(dfs, ignore_index=True)
 metadata_df = pd.DataFrame(run_metadata)
 
+# Apply space_id filter if provided
+if space_id_filter:
+    original_count = len(combined_df)
+    combined_df = combined_df[combined_df['space_id'] == space_id_filter]
+    metadata_df = metadata_df[metadata_df['space_id'] == space_id_filter]
+    filtered_count = len(combined_df)
+    print(f"\nFiltered from {original_count} to {filtered_count} records (space_id: {space_id_filter})")
+    
+    if len(combined_df) == 0:
+        available_spaces = metadata_df['space_id'].unique() if not metadata_df.empty else []
+        raise ValueError(f"No data for space_id '{space_id_filter}'. Available: {list(available_spaces)}")
+
 print(f"\nTotal records: {len(combined_df)}")
 print(f"Unique runs: {combined_df['run_id'].nunique()}")
+print(f"Space IDs: {sorted(combined_df['space_id'].unique())}")
 print(f"Concurrent user levels: {sorted(combined_df['concurrent_users'].unique())}")
 
 # COMMAND ----------

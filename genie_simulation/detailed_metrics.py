@@ -20,6 +20,7 @@ class RequestMetric:
     """A single request metric record."""
     
     run_id: str  # Unique run identifier (results directory name)
+    space_id: str  # Genie space ID
     request_started_at: datetime
     request_completed_at: datetime
     duration_ms: float
@@ -54,6 +55,7 @@ class DetailedMetricsCollector:
         
         collector.record(RequestMetric(
             run_id="genie_loadtest_ABC123_5users_60s_20260205",  # Results directory name
+            space_id="01JCQK9M1234567890AB",        # Genie space ID
             request_started_at=started_at,
             request_completed_at=completed_at,
             duration_ms=1500.5,
@@ -119,7 +121,7 @@ class DetailedMetricsCollector:
             with open(path, "w", newline="") as f:
                 writer = csv.writer(f)
                 writer.writerow([
-                    "run_id", "request_started_at", "request_completed_at", "duration_ms",
+                    "run_id", "space_id", "request_started_at", "request_completed_at", "duration_ms",
                     "concurrent_users", "user", "prompt", "source_conversation_id",
                     "source_message_id", "genie_conversation_id", "genie_message_id",
                     "message_index", "sql", "response_size", "success", "error"

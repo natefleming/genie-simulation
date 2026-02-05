@@ -508,8 +508,10 @@ class InMemorySemanticCachedGenieUser(User):
 
             # Record detailed metrics
             run_id = os.path.basename(os.environ.get("GENIE_RESULTS_DIR", "unknown_run"))
+            space_id = os.environ.get("GENIE_SPACE_ID", "unknown_space")
             DETAILED_METRICS.record(RequestMetric(
                 run_id=run_id,
+                space_id=space_id,
                 request_started_at=request_started_at,
                 request_completed_at=request_completed_at,
                 duration_ms=duration_ms,
