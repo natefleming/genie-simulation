@@ -174,21 +174,5 @@ class DetailedMetricsCollector:
             }
 
 
-def generate_metrics_filename() -> str:
-    """
-    Generate a metrics filename with simulation config and timestamp.
-    
-    The filename includes user count, run time, and a timestamp for
-    better traceability of test runs.
-    
-    Returns:
-        Path string like "results/genie_detailed_metrics_5users_60s_20260204_153045.csv"
-    """
-    user_count = os.environ.get("GENIE_USER_COUNT", "unknown")
-    run_time = os.environ.get("GENIE_RUN_TIME", "unknown")
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return f"results/genie_detailed_metrics_{user_count}users_{run_time}_{timestamp}.csv"
-
-
 # Global instance for use across Locust users
 DETAILED_METRICS = DetailedMetricsCollector()

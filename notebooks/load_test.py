@@ -126,14 +126,3 @@ results = run_load_test(
 # MAGIC Results have been saved to a timestamped directory. Use the **analyze_results** notebook to 
 # MAGIC view detailed analysis and visualizations.
 
-# COMMAND ----------
-
-print(f"Results saved to: {results.results_dir}")
-print("\nFiles in results directory:")
-print(f"  - stats.csv: Locust summary statistics")
-print(f"  - stats_history.csv: Time-series throughput data")
-print(f"  - failures.csv: Request failures (if any)")
-print(f"  - exceptions.csv: Exceptions (if any)")
-print(f"  - detailed_metrics.csv: Per-request detailed metrics")
-print("\nTo analyze results, run the analyze_results notebook with:")
-print(f'  results_dir = "{results.results_dir}"')
