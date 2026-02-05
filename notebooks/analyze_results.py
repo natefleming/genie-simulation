@@ -37,6 +37,7 @@ dbutils.library.restartPython()
 import os
 from glob import glob
 from pathlib import Path
+from typing import Optional
 
 import pandas as pd
 
@@ -48,13 +49,29 @@ import pandas as pd
 # COMMAND ----------
 
 # List available results directories
+# Use relative path which works correctly in Databricks notebooks
 results_base = "results"
-available_dirs = sorted(glob(f"{results_base}/*"), key=lambda d: Path(d).stat().st_mtime, reverse=True)
+print(f"Current working directory: {os.getcwd()}")
+print(f"Results base: {results_base}")
+print(f"Results directory exists: {Path(results_base).exists()}")
+
+# Find all result directories using relative path
+available_dirs = []
+if Path(results_base).exists():
+    available_dirs = sorted(
+        glob(f"{results_base}/*"), 
+        key=lambda d: Path(d).stat().st_mtime if Path(d).exists() else 0, 
+        reverse=True
+    )
 
 # Show available directories
-print("Available results directories (newest first):")
-for i, d in enumerate(available_dirs[:10]):
-    print(f"  {i+1}. {d}")
+print(f"\nFound {len(available_dirs)} results directories")
+print(f"Available results directories (newest first):")
+if available_dirs:
+    for i, d in enumerate(available_dirs[:10]):
+        print(f"  {i+1}. {d}")
+else:
+    print("  (No results directories found)")
 
 # COMMAND ----------
 
@@ -77,11 +94,63 @@ print(f"Analyzing results from: {results_dir}")
 # COMMAND ----------
 
 # Load all CSV files from the results directory
+# Handle both local filesystem paths and Databricks workspace paths
+
+def file_exists_dbx(path: str) -> bool:
+    """Check if file exists - works with both local and workspace paths."""
+    try:
+        # First try local filesystem (for driver local paths)
+        if Path(path).exists():
+            return True
+        # Try dbutils for workspace/DBFS paths
+        try:
+            dbutils.fs.ls(path)
+            return True
+        except Exception:
+            pass
+        return False
+    except Exception:
+        return False
+
+def read_csv_dbx(path: str) -> pd.DataFrame:
+    """Read CSV - handles both local and workspace paths."""
+    try:
+        # Try local path first
+        local_path = Path(path)
+        if local_path.exists():
+            return pd.read_csv(local_path)
+        # Try workspace path (for files in /Workspace)
+        # Convert to driver-accessible path
+        if path.startswith("/Workspace"):
+            driver_path = path.replace("/Workspace", "/Workspace")
+            if Path(driver_path).exists():
+                return pd.read_csv(driver_path)
+        return pd.DataFrame()
+    except Exception as e:
+        print(f"Error reading {path}: {e}")
+        return pd.DataFrame()
+
+# Use relative paths as-is (they work correctly in Databricks)
+# Only show debug info
+print(f"Current working directory: {os.getcwd()}")
+print(f"Looking for files in: {results_dir}")
+print(f"Directory exists: {Path(results_dir).exists() if results_dir else 'N/A'}")
+
+if results_dir and Path(results_dir).exists():
+    print(f"Directory contents:")
+    for f in os.listdir(results_dir):
+        print(f"  - {f}")
+
 stats_path = Path(results_dir) / "stats.csv"
 history_path = Path(results_dir) / "stats_history.csv"
 failures_path = Path(results_dir) / "failures.csv"
 exceptions_path = Path(results_dir) / "exceptions.csv"
 detailed_metrics_path = Path(results_dir) / "detailed_metrics.csv"
+
+# Debug: Show path existence
+print(f"\nFile existence check:")
+print(f"  - stats.csv: {stats_path} -> exists={stats_path.exists()}")
+print(f"  - detailed_metrics.csv: {detailed_metrics_path} -> exists={detailed_metrics_path.exists()}")
 
 # Load DataFrames
 stats_df = pd.read_csv(stats_path) if stats_path.exists() else pd.DataFrame()
@@ -90,7 +159,7 @@ failures_df = pd.read_csv(failures_path) if failures_path.exists() else pd.DataF
 exceptions_df = pd.read_csv(exceptions_path) if exceptions_path.exists() else pd.DataFrame()
 detailed_metrics_df = pd.read_csv(detailed_metrics_path) if detailed_metrics_path.exists() else pd.DataFrame()
 
-print(f"Loaded files:")
+print(f"\nLoaded files:")
 print(f"  - stats.csv: {len(stats_df)} rows")
 print(f"  - stats_history.csv: {len(history_df)} rows")
 print(f"  - failures.csv: {len(failures_df)} rows")

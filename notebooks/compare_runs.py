@@ -42,8 +42,22 @@ from scipy import stats
 # COMMAND ----------
 
 # List available results directories
+# Use relative path which works correctly in Databricks notebooks
 results_base = "results"
-available_dirs = sorted(glob(f"{results_base}/genie_*"), key=lambda d: Path(d).stat().st_mtime, reverse=True)
+print(f"Current working directory: {os.getcwd()}")
+print(f"Results base: {results_base}")
+print(f"Results directory exists: {Path(results_base).exists()}")
+
+# Find all genie_* directories using relative path
+available_dirs = []
+if Path(results_base).exists():
+    available_dirs = sorted(
+        glob(f"{results_base}/genie_*"), 
+        key=lambda d: Path(d).stat().st_mtime if Path(d).exists() else 0, 
+        reverse=True
+    )
+
+print(f"Found {len(available_dirs)} results directories")
 
 def extract_metadata_from_dirname(dir_name: str) -> dict:
     """Extract metadata (space_id, users) from results directory name."""
@@ -62,14 +76,22 @@ def extract_metadata_from_dirname(dir_name: str) -> dict:
     
     return {"space_id": space_id, "users": user_info}
 
-print("Available results directories (newest first):")
+print("\nAvailable results directories (newest first):")
 print("-" * 80)
-for i, d in enumerate(available_dirs[:20]):
-    dir_name = os.path.basename(d)
-    metadata = extract_metadata_from_dirname(dir_name)
-    mtime = datetime.fromtimestamp(Path(d).stat().st_mtime).strftime("%Y-%m-%d %H:%M")
-    print(f"  {i+1:2}. {dir_name}")
-    print(f"      Space: {metadata['space_id']}, Users: {metadata['users']}, Modified: {mtime}")
+if available_dirs:
+    for i, d in enumerate(available_dirs[:20]):
+        dir_name = os.path.basename(d)
+        metadata = extract_metadata_from_dirname(dir_name)
+        try:
+            mtime = datetime.fromtimestamp(Path(d).stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            mtime = "unknown"
+        print(f"  {i+1:2}. {dir_name}")
+        print(f"      Space: {metadata['space_id']}, Users: {metadata['users']}, Modified: {mtime}")
+else:
+    print("  (No results directories found)")
+    print(f"\n  Searched in: {possible_bases}")
+    print(f"\n  Looking for directories matching: genie_*")
 
 # COMMAND ----------
 
@@ -89,10 +111,20 @@ raw_dirs = [d.strip() for d in results_dirs_text.strip().split(",") if d.strip()
 # Normalize paths - prepend results/ if not already present
 results_dirs = []
 for d in raw_dirs:
-    if not d.startswith("results/") and not d.startswith("/"):
-        d = f"results/{d}"
-    results_dirs.append(d)
+    # Skip empty entries
+    if not d:
+        continue
+    # If absolute path, use as-is
+    if os.path.isabs(d):
+        results_dirs.append(d)
+    # If already has results/ prefix, use as-is
+    elif d.startswith("results/"):
+        results_dirs.append(d)
+    else:
+        # Prepend results/ for bare directory names
+        results_dirs.append(f"results/{d}")
 
+# Debug output
 print(f"Current working directory: {os.getcwd()}")
 print(f"Selected {len(results_dirs)} directories for comparison:")
 for d in results_dirs:
@@ -117,8 +149,21 @@ else:
 dfs = []
 run_metadata = []
 
+print("\nLoading data from directories:")
+print("-" * 60)
+
 for dir_path in results_dirs:
     metrics_path = Path(dir_path) / "detailed_metrics.csv"
+    print(f"\nChecking: {dir_path}")
+    print(f"  Directory exists: {os.path.isdir(dir_path)}")
+    print(f"  Metrics file: {metrics_path}")
+    print(f"  Metrics exists: {metrics_path.exists()}")
+    
+    # List directory contents if it exists
+    if os.path.isdir(dir_path):
+        contents = os.listdir(dir_path)
+        print(f"  Contents: {contents[:5]}{'...' if len(contents) > 5 else ''}")
+    
     if metrics_path.exists():
         df = pd.read_csv(metrics_path)
         
