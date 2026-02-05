@@ -224,6 +224,84 @@ class QueryHistoryClient:
         """Clear the metrics cache."""
         with self._lock:
             self._cache.clear()
+    
+    def get_all_queries_in_timerange(
+        self,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> list[SQLExecutionMetrics]:
+        """
+        Fetch all query history entries for a time range.
+        
+        This is useful for post-processing enrichment where we want to fetch
+        all queries at once and then match them with load test metrics.
+        
+        Args:
+            start_time: Start of the time range.
+            end_time: End of the time range.
+            
+        Returns:
+            List of SQLExecutionMetrics for all queries in the time range.
+        """
+        # Format timestamps for SQL
+        start_ts = start_time.strftime("%Y-%m-%d %H:%M:%S")
+        end_ts = end_time.strftime("%Y-%m-%d %H:%M:%S")
+        
+        query = f"""
+        SELECT
+            statement_id,
+            statement_text,
+            COALESCE(execution_time_ms, 0) as execution_time_ms,
+            COALESCE(compilation_time_ms, 0) as compilation_time_ms,
+            COALESCE(rows_produced, 0) as rows_produced,
+            COALESCE(read_bytes, 0) as bytes_read,
+            COALESCE(write_bytes, 0) as bytes_written,
+            start_time,
+            end_time,
+            status
+        FROM {self.system_catalog}.query.history
+        WHERE start_time >= '{start_ts}'
+          AND start_time <= '{end_ts}'
+          AND statement_type = 'SELECT'
+        ORDER BY start_time
+        """
+        
+        results: list[SQLExecutionMetrics] = []
+        
+        try:
+            response = self._client.statement_execution.execute_statement(
+                warehouse_id=self.warehouse_id,
+                statement=query,
+                wait_timeout="120s",
+            )
+            
+            if response.status and response.status.state == StatementState.SUCCEEDED:
+                if response.result and response.result.data_array:
+                    for row in response.result.data_array:
+                        metrics = SQLExecutionMetrics(
+                            statement_id=str(row[0]) if row[0] else "",
+                            execution_time_ms=float(row[2]) if row[2] else 0.0,
+                            compilation_time_ms=float(row[3]) if row[3] else 0.0,
+                            rows_produced=int(row[4]) if row[4] else 0,
+                            bytes_read=int(row[5]) if row[5] else 0,
+                            bytes_written=int(row[6]) if row[6] else 0,
+                            start_time=datetime.fromisoformat(str(row[7])) if row[7] else start_time,
+                            end_time=datetime.fromisoformat(str(row[8])) if row[8] else end_time,
+                            status=str(row[9]) if row[9] else "UNKNOWN",
+                        )
+                        results.append(metrics)
+                        
+                        # Also cache by SQL text if we have it
+                        if row[1]:
+                            cache_key = self._sql_hash(str(row[1]))
+                            with self._lock:
+                                self._cache[cache_key] = metrics
+                        
+        except Exception as e:
+            import logging
+            logging.warning(f"Failed to fetch query history for timerange: {e}")
+        
+        return results
 
 
 # Global instance for use across the application

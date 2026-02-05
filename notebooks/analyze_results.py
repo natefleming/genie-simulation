@@ -1197,6 +1197,108 @@ else:
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Enrich Metrics with SQL Execution Data
+# MAGIC
+# MAGIC **What it does:** Fetches SQL execution metrics (execution time, compilation time, rows produced,
+# MAGIC bytes read/written) from `system.query.history` and enriches the detailed_metrics.csv file.
+# MAGIC
+# MAGIC **Important:** The `system.query.history` table has 15-30 minute ingestion latency. This
+# MAGIC enrichment should only be run after waiting for the data to propagate.
+# MAGIC
+# MAGIC **Prerequisites:**
+# MAGIC - `GENIE_WAREHOUSE_ID` environment variable set (or entered in widget below)
+# MAGIC - Wait at least 15-30 minutes after the load test completes
+
+# COMMAND ----------
+
+# Check if enrichment is needed
+enrichment_needed = False
+if not detailed_metrics_df.empty:
+    if 'sql_execution_time_ms' in detailed_metrics_df.columns:
+        # Check if column exists but is mostly empty
+        enriched_count = detailed_metrics_df['sql_execution_time_ms'].notna().sum()
+        sql_count = detailed_metrics_df['sql'].notna().sum()
+        if enriched_count == 0 and sql_count > 0:
+            enrichment_needed = True
+            print(f"⚠️  SQL execution metrics are empty ({enriched_count}/{sql_count} rows enriched)")
+            print("   The detailed_metrics.csv file was not enriched with system.query.history data.")
+            print("\n   This is expected if:")
+            print("   1. The load test completed less than 15-30 minutes ago")
+            print("   2. You haven't run the enrichment step yet")
+            print("\n   Run the next cell to enrich the metrics with SQL execution data.")
+        else:
+            print(f"✓ SQL execution metrics present: {enriched_count}/{sql_count} rows ({enriched_count/sql_count*100:.1f}% coverage)")
+    else:
+        print("ℹ️  SQL execution metrics columns not found in detailed_metrics.csv")
+else:
+    print("No detailed metrics data available")
+
+# COMMAND ----------
+
+# Widget for warehouse ID (needed for enrichment)
+import os
+default_warehouse_id = os.environ.get("GENIE_WAREHOUSE_ID", "")
+dbutils.widgets.text("warehouse_id", default_warehouse_id, "SQL Warehouse ID (for enrichment)")
+
+# COMMAND ----------
+
+# Run enrichment (optional - only run if you want to enrich metrics)
+# 
+# This cell will:
+# 1. Read the detailed_metrics.csv from the results directory
+# 2. Query system.query.history for the time range of the load test
+# 3. Match SQL queries and enrich with execution metrics
+# 4. Save the enriched file back to the same location
+#
+# IMPORTANT: Wait at least 15-30 minutes after the load test before running this!
+
+run_enrichment = False  # Set to True to run enrichment
+
+if run_enrichment and enrichment_needed:
+    warehouse_id = dbutils.widgets.get("warehouse_id")
+    
+    if not warehouse_id:
+        print("❌ Error: Please enter a SQL Warehouse ID in the widget above")
+        print("   This is required to query system.query.history")
+    else:
+        print("=" * 70)
+        print("ENRICHING METRICS WITH SQL EXECUTION DATA")
+        print("=" * 70)
+        
+        # Import the enrichment function
+        import sys
+        sys.path.insert(0, "..")  # Add parent directory to path for genie_simulation module
+        
+        from genie_simulation.enrich_metrics import enrich_metrics_with_query_history
+        
+        metrics_path = Path(results_dir) / "detailed_metrics.csv"
+        
+        try:
+            enriched_df = enrich_metrics_with_query_history(
+                metrics_csv_path=str(metrics_path),
+                warehouse_id=warehouse_id,
+            )
+            
+            # Reload the dataframe
+            detailed_metrics_df = enriched_df
+            
+            print("\n✓ Enrichment complete! Re-run the cells below to see updated SQL execution metrics.")
+            
+        except Exception as e:
+            print(f"❌ Enrichment failed: {e}")
+            print("\n   Possible causes:")
+            print("   - Invalid warehouse ID")
+            print("   - Insufficient permissions on system.query.history")
+            print("   - Load test too recent (data not yet in system tables)")
+elif run_enrichment and not enrichment_needed:
+    print("ℹ️  Enrichment not needed - metrics are already enriched or no SQL queries to enrich")
+else:
+    print("ℹ️  Enrichment skipped. Set run_enrichment = True to run.")
+    print("   Make sure to wait 15-30 minutes after the load test before enriching.")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## SQL Execution Metrics (from system.query.history)
 # MAGIC
 # MAGIC **What it shows:** Actual SQL execution time in the warehouse as captured from the Databricks
