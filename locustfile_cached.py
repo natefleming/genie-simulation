@@ -38,9 +38,11 @@ import random
 import sys
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import mlflow
 import yaml
 from dao_ai.config import (
     DatabaseModel,
@@ -50,10 +52,17 @@ from dao_ai.config import (
 )
 from dao_ai.genie import GenieService, GenieServiceBase
 from dao_ai.genie.cache import CacheResult, LRUCacheService, PostgresContextAwareGenieService
-from databricks_ai_bridge.genie import Genie, GenieResponse
+from dao_ai.genie import Genie, GenieResponse
 from dotenv import load_dotenv
 from locust import User, between, events, task
 from loguru import logger
+
+from genie_simulation.detailed_metrics import (
+    DETAILED_METRICS,
+    generate_metrics_filename,
+    RequestMetric,
+)
+from genie_simulation.export_to_uc import export_to_unity_catalog_if_available
 
 # Load environment variables from .env file if present
 load_dotenv()
@@ -431,6 +440,7 @@ class CachedGenieLoadTestUser(User):
                 )
 
             # Time the request
+            request_started_at: datetime = datetime.now()
             start_time: float = time.time()
             exception: Exception | None = None
             response_length: int = 0
@@ -478,17 +488,38 @@ class CachedGenieLoadTestUser(User):
 
             except Exception as e:
                 exception = e
+                response = None
                 CACHE_METRICS.record_miss()
                 logger.error("Request failed", user=self.user_id, error=str(e))
 
             # Calculate response time in milliseconds
-            response_time = (time.time() - start_time) * 1000
+            request_completed_at: datetime = datetime.now()
+            duration_ms = (time.time() - start_time) * 1000
+
+            # Record detailed metrics
+            DETAILED_METRICS.record(RequestMetric(
+                request_started_at=request_started_at,
+                request_completed_at=request_completed_at,
+                duration_ms=duration_ms,
+                concurrent_users=int(os.environ.get("GENIE_USER_COUNT", "1")),
+                user=f"user_{self.user_id}",
+                prompt=content,
+                source_conversation_id=conversation.get("id"),
+                source_message_id=msg.get("message_id"),
+                genie_conversation_id=response.conversation_id if response else None,
+                genie_message_id=response.message_id if response else None,
+                message_index=i,
+                sql=response.query if response else None,
+                response_size=response_length,
+                success=exception is None,
+                error=str(exception) if exception else None,
+            ))
 
             # Fire the request event for Locust to track
             events.request.fire(
                 request_type=request_type,
                 name=f"message_{i+1}_of_{len(messages)}",
-                response_time=response_time,
+                response_time=duration_ms,
                 response_length=response_length,
                 exception=exception,
                 context={
@@ -502,181 +533,6 @@ class CachedGenieLoadTestUser(User):
             if i < len(messages) - 1:
                 wait_time_before = random.uniform(MIN_WAIT / 2, MAX_WAIT / 2)
                 time.sleep(wait_time_before)
-
-
-class CachedGenieSequentialUser(User):
-    """
-    A simpler user that sends individual messages through the cache service.
-    
-    Useful for testing cache behavior with standalone questions.
-    """
-
-    wait_time = between(MIN_WAIT, MAX_WAIT)
-    
-    _user_counter: int = 0
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self.genie_service: GenieServiceBase | None = None
-        self.space_id: str = CONVERSATIONS_DATA.get("space_id", "")
-        self.all_messages: list[str] = []
-        self.last_message_time: float | None = None
-        self.message_count: int = 0
-        
-        CachedGenieSequentialUser._user_counter += 1
-        self.user_id: int = CachedGenieSequentialUser._user_counter
-
-    def on_start(self) -> None:
-        """Initialize and collect all messages."""
-        if not self.space_id:
-            raise ValueError("No space_id found. Set GENIE_SPACE_ID environment variable.")
-
-        # Validate required cache configuration
-        missing_config = []
-        if not GENIE_LAKEBASE_CLIENT_ID:
-            missing_config.append("GENIE_LAKEBASE_CLIENT_ID")
-        if not GENIE_LAKEBASE_CLIENT_SECRET:
-            missing_config.append("GENIE_LAKEBASE_CLIENT_SECRET")
-        if not LAKEBASE_INSTANCE:
-            missing_config.append("GENIE_LAKEBASE_INSTANCE")
-        if not WAREHOUSE_ID:
-            missing_config.append("GENIE_WAREHOUSE_ID")
-        
-        if missing_config:
-            raise ValueError(
-                f"Missing required environment variables: {', '.join(missing_config)}."
-            )
-
-        logger.info("Initializing cached Genie service", seq_user=self.user_id, space_id=self.space_id)
-        
-        # Create and wrap Genie service (same as CachedGenieLoadTestUser)
-        genie = Genie(space_id=self.space_id)
-        genie_service: GenieServiceBase = GenieService(genie=genie)
-        
-        database = DatabaseModel(
-            instance_name=LAKEBASE_INSTANCE,
-            client_id=GENIE_LAKEBASE_CLIENT_ID,
-            client_secret=GENIE_LAKEBASE_CLIENT_SECRET,
-        )
-        
-        warehouse = WarehouseModel(warehouse_id=WAREHOUSE_ID)
-        
-        semantic_cache_params = GenieContextAwareCacheParametersModel(
-            database=database,
-            warehouse=warehouse,
-            time_to_live_seconds=CACHE_TTL,
-            similarity_threshold=SIMILARITY_THRESHOLD,
-        )
-        
-        genie_service = PostgresContextAwareGenieService(
-            impl=genie_service,
-            parameters=semantic_cache_params,
-        ).initialize()
-        
-        lru_cache_params = GenieLRUCacheParametersModel(
-            warehouse=warehouse,
-            capacity=LRU_CAPACITY,
-            time_to_live_seconds=CACHE_TTL,
-        )
-        
-        self.genie_service = LRUCacheService(
-            impl=genie_service,
-            parameters=lru_cache_params,
-        )
-
-        # Flatten all messages into a single list
-        for conv in CONVERSATIONS_DATA.get("conversations", []):
-            for msg in conv.get("messages", []):
-                content: str = msg.get("content", "")
-                if content:
-                    self.all_messages.append(content)
-
-        logger.info("Collected messages for random selection", seq_user=self.user_id, count=len(self.all_messages))
-
-    @task
-    def send_random_message(self) -> None:
-        """Send a random message through the cache service."""
-        if not self.all_messages or not self.genie_service:
-            return
-
-        self.message_count += 1
-        content: str = random.choice(self.all_messages)
-        
-        content_preview: str = content[:80] + "..." if len(content) > 80 else content
-        
-        current_time: float = time.time()
-        if self.last_message_time is None:
-            logger.info(
-                "Sending message",
-                seq_user=self.user_id,
-                msg_num=self.message_count,
-                content=content_preview,
-            )
-        else:
-            wait_time: float = current_time - self.last_message_time
-            logger.info(
-                "Sending message",
-                seq_user=self.user_id,
-                msg_num=self.message_count,
-                wait_s=round(wait_time, 1),
-                content=content_preview,
-            )
-
-        start_time: float = time.time()
-        exception: Exception | None = None
-        response_length: int = 0
-        cache_status: str = "miss"
-        request_type: str = "GENIE_LIVE"
-
-        try:
-            result: CacheResult = self.genie_service.ask_question(content)
-            
-            response: GenieResponse = result.response
-            response_length = len(str(response)) if response else 0
-            response_time_secs: float = time.time() - start_time
-            
-            if result.cache_hit:
-                served_by = (result.served_by or "").lower()
-                
-                if "lru" in served_by:
-                    cache_status = "hit:lru"
-                    CACHE_METRICS.record_hit("lru")
-                    request_type = "GENIE_LRU_HIT"
-                elif "semantic" in served_by:
-                    cache_status = "hit:semantic"
-                    CACHE_METRICS.record_hit("semantic")
-                    request_type = "GENIE_SEMANTIC_HIT"
-                else:
-                    cache_status = "hit"
-                    CACHE_METRICS.record_hit("semantic")
-                    request_type = "GENIE_CACHED"
-            else:
-                cache_status = "miss"
-                CACHE_METRICS.record_miss()
-            
-            logger.info(
-                "Response received",
-                seq_user=self.user_id,
-                bytes=response_length,
-                time_s=round(response_time_secs, 2),
-                cache=cache_status,
-            )
-        except Exception as e:
-            exception = e
-            CACHE_METRICS.record_miss()
-            logger.error("Request failed", seq_user=self.user_id, error=str(e))
-
-        self.last_message_time = time.time()
-        response_time: float = (time.time() - start_time) * 1000
-
-        events.request.fire(
-            request_type=request_type,
-            name="random_message",
-            response_time=response_time,
-            response_length=response_length,
-            exception=exception,
-            context={"cache_status": cache_status},
-        )
 
 
 # =============================================================================
@@ -848,3 +704,18 @@ def on_test_stop(environment: Any, **kwargs: Any) -> None:
                 )
         
         logger.info("-" * 80)
+    
+    # Write detailed metrics to CSV in results directory
+    os.makedirs("results", exist_ok=True)
+    csv_path = generate_metrics_filename()
+    records_written = DETAILED_METRICS.to_csv(csv_path)
+    if records_written > 0:
+        logger.info(f"Detailed metrics written to {csv_path} ({records_written} records)")
+        summary = DETAILED_METRICS.get_summary()
+        logger.info(
+            f"Metrics summary: {summary['successful_requests']}/{summary['total_requests']} successful "
+            f"({summary['success_rate']:.1f}%), avg {summary['avg_execution_time_ms']:.0f}ms"
+        )
+    
+    # Export to Unity Catalog if running in Databricks notebook
+    export_to_unity_catalog_if_available()

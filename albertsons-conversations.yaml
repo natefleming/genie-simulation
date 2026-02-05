@@ -1,0 +1,66 @@
+space_id: 01f0c482e842191587af6a40ad4044d8
+exported_at: '2026-02-04T00:00:00.000000'
+total_conversations: 1
+total_messages: 19
+conversations:
+- id: alb-conv-001
+  title: Albertsons Jewel Osco Analytics Questions
+  created_timestamp: 1738627200000
+  messages:
+  - content: "Show a table of UPCs in the salty snack category at Jewel Osco for Q2 2025 that had year-over-year AGP declines. Include columns for UPC, this year AGP, last year AGP, and the variance. Sort by variance ascending (most negative first)."
+    timestamp: 1738627200000
+    message_id: 0
+  - content: "Show the top 50 UPCs by AGP decline (sorted by most negative variance) for Jewel Osco in the Salty Snack category, comparing Q2 2025 to Q2 2024. Include UPC, description, AGP for Q2 2025, AGP for Q2 2024, and variance."
+    timestamp: 1738627200001
+    message_id: 1
+  - content: "Show store sales by store for the ketchup category in Jewel's J3 district for Q2 2025, including this year's sales, last year's sales, and year-over-year variance."
+    timestamp: 1738627200002
+    message_id: 2
+  - content: "List all stores in district J3 for Jewel Osco, including store IDs and their cities."
+    timestamp: 1738627200003
+    message_id: 3
+  - content: "List the UPCs for Jewel Osco in Q3 2025 that were sold in fewer than 100 stores. For each, provide the UPC, item description, and total sales, sorted by highest sales."
+    timestamp: 1738627200004
+    message_id: 4
+  - content: "Show sales, store count, upc, and description for UPCs in the Grocery Food department at Jewel Osco in Q3 2025, limited to items found in fewer than 100 stores, sorted by sales."
+    timestamp: 1738627200005
+    message_id: 5
+  - content: "Show a table for Jewel Osco, Grocery Food, Q3 2025 for UPCs that are in fewer than 100 stores, including UPC, description, sales, units sold, and store count."
+    timestamp: 1738627200006
+    message_id: 6
+  - content: "Can you provide the most recent price check for Jewel Osco compared to Walmart with all data fields provided from the dataset (direct question genie)"
+    timestamp: 1738627200007
+    message_id: 7
+  - content: "Can you provide the most recent price check for Jewel Osco compared to Walmart with all data fields provided from the dataset for the items in the salty snack category (string too long - no route to genie)"
+    timestamp: 1738627200008
+    message_id: 8
+  - content: "Show the top 5 Jewel stores by produce sales growth percentage for fiscal week 40 of 2025. Include store ID, city, produce sales this year, produce sales last year, and percent variance."
+    timestamp: 1738627200009
+    message_id: 9
+  - content: "List every common item group featured on the front cover (page 1) of the ad released on September 10, 2025."
+    timestamp: 1738627200010
+    message_id: 10
+  - content: "How many ads were released at Jewel Osco during April 2025?"
+    timestamp: 1738627200011
+    message_id: 11
+  - content: "List all ad release dates in April 2025 for Jewel Osco and count the number of distinct ad release dates during that period."
+    timestamp: 1738627200012
+    message_id: 12
+  - content: "Show the cost structure breakdown for ZICO COCONUT WATER NATURAL (Vendor List Cost, Net Cost, Total Backend, Dead Net Cost, Bill Out Gross)."
+    timestamp: 1738627200013
+    message_id: 13
+  - content: "Show the per unit cost of ZICO COCONUT WATER NATURAL for JEWEL, year-to-date versus previous year-to-date, in Produce / PRODUCE PREMIUM BEVERAGES."
+    timestamp: 1738627200014
+    message_id: 14
+  - content: "Show cost KPIs for ZICO COCONUT WATER NATURAL in JEWEL, Produce / PRODUCE PREMIUM BEVERAGES, year-to-date compared to previous year-to-date."
+    timestamp: 1738627200015
+    message_id: 15
+  - content: "Show Net Sales by Store for Category 'KETCHUP' in Division 'JEWEL', District Code 'J3', Fiscal Quarter 2 of Fiscal Year 2025, with Year over Year comparison. Include: Store ID, FACILITY_INTEGRATION_ID, Store Name, District Code, Division Name, Fiscal Year, Fiscal Quarter, Net Sales (This Year), Net Sales (Last Year), and Variance."
+    timestamp: 1738627200016
+    message_id: 16
+  - content: "Show Net Sales by Store for Division JEWEL in Fiscal Week 34 of Fiscal Year 2025, only for stores where Net Sales exceeded $1,000,000 that week. List the Store ID, FACILITY_INTEGRATION_ID, store name, District Code, district name, Fiscal Year, Fiscal Week, and Net Sales. Also, provide the count of stores meeting this threshold. Sort by Net Sales descending."
+    timestamp: 1738627200017
+    message_id: 17
+  - content: "Show Net Sales (sum of NET_AMT) grouped by COMMON_ITEM_GROUP_CD (as CIG) and COMMON_ITEM_GROUP_DSC (as Description) for Department GROCERY FOOD in Division JEWEL for Fiscal Quarter 3 of Fiscal Year 2025. Only include CIGs where the UPCs were featured in the JEWEL ad with PAGE_NBR 1 and AD_FIRST_EFFECTIVE_DT 2026-01-14."
+    timestamp: 1738627200018
+    message_id: 18

@@ -7,6 +7,12 @@ from genie_simulation.config import (
     load_config,
     LoadTestConfig,
 )
+from genie_simulation.detailed_metrics import (
+    DETAILED_METRICS,
+    DetailedMetricsCollector,
+    generate_metrics_filename,
+    RequestMetric,
+)
 from genie_simulation.notebook_runner import (
     cleanup_csv_files,
     LoadTestResults,
@@ -17,9 +23,13 @@ from genie_simulation.notebook_runner import (
 __all__ = [
     "CacheConfig",
     "cleanup_csv_files",
+    "DETAILED_METRICS",
+    "DetailedMetricsCollector",
+    "generate_metrics_filename",
     "load_config",
     "LoadTestConfig",
     "LoadTestResults",
+    "RequestMetric",
     "run_cached_load_test",
     "run_load_test",
 ]

@@ -196,10 +196,64 @@ else:
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## Export Detailed Metrics to Unity Catalog
+# MAGIC 
+# MAGIC This section loads the detailed per-request metrics CSV and saves them to a Unity Catalog table.
+
+# COMMAND ----------
+
+dbutils.widgets.text("uc_catalog", "", "Unity Catalog Name (optional)")
+dbutils.widgets.text("uc_schema", "", "Unity Catalog Schema (optional)")
+dbutils.widgets.text("uc_table", "genie_detailed_metrics", "Detailed Metrics Table Name")
+
+# COMMAND ----------
+
+import os
+from glob import glob
+import pandas as pd
+
+uc_catalog = dbutils.widgets.get("uc_catalog")
+uc_schema = dbutils.widgets.get("uc_schema")
+uc_table = dbutils.widgets.get("uc_table")
+
+# Find the most recent detailed metrics CSV file
+csv_files = sorted(glob("results/genie_detailed_metrics_*.csv"))
+if csv_files:
+    # Use the most recent file (last in sorted list by timestamp in filename)
+    csv_path = csv_files[-1]
+    
+    # Load the CSV
+    detailed_metrics_pdf = pd.read_csv(csv_path)
+    print(f"Loaded {len(detailed_metrics_pdf)} records from {csv_path}")
+    
+    # Display sample
+    display(detailed_metrics_pdf.head(10))
+    
+    # Save to Unity Catalog if configured
+    if uc_catalog and uc_schema:
+        table_name = f"{uc_catalog}.{uc_schema}.{uc_table}"
+        detailed_metrics_df = spark.createDataFrame(detailed_metrics_pdf)
+        detailed_metrics_df.write.mode("append").saveAsTable(table_name)
+        print(f"\nAppended {len(detailed_metrics_pdf)} records to {table_name}")
+    else:
+        print("\nSkipping Unity Catalog export (catalog/schema not configured)")
+else:
+    print("No detailed metrics files found in results/")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Clean Up
 
 # COMMAND ----------
 
 from genie_simulation.notebook_runner import cleanup_csv_files
+from glob import glob
+import os
 
 cleanup_csv_files("genie_loadtest")
+
+# Clean up all detailed metrics CSV files
+for csv_file in glob("results/genie_detailed_metrics_*.csv"):
+    os.remove(csv_file)
+    print(f"Removed {csv_file}")

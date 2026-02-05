@@ -281,3 +281,6 @@ databricks.yaml
 
 # Deployment directory for local source code
 deploy/
+
+# Load test results directory
+results/

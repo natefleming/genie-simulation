@@ -31,10 +31,22 @@ import sys
 import time
 import threading
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+# Add parent directory to path for genie_simulation imports
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from genie_simulation.detailed_metrics import (
+    DETAILED_METRICS,
+    generate_metrics_filename,
+    RequestMetric,
+)
+from genie_simulation.export_to_uc import export_to_unity_catalog_if_available
+
 from dao_ai.config import (
     DatabaseModel,
     GenieLRUCacheParametersModel,
@@ -44,7 +56,7 @@ from dao_ai.config import (
 from dao_ai.genie import GenieService, GenieServiceBase
 from dao_ai.genie.cache import CacheResult, LRUCacheService, PostgresContextAwareGenieService
 from databricks.sdk import WorkspaceClient
-from databricks_ai_bridge.genie import Genie, GenieResponse
+from dao_ai.genie import Genie, GenieResponse
 from locust import User, between, events, task
 from loguru import logger
 
@@ -277,6 +289,7 @@ class CachedGenieLoadTestUser(User):
             if not content:
                 continue
 
+            request_started_at: datetime = datetime.now()
             start_time: float = time.time()
             exception: Exception | None = None
             response_length: int = 0
@@ -311,15 +324,36 @@ class CachedGenieLoadTestUser(User):
 
             except Exception as e:
                 exception = e
+                response = None
                 CACHE_METRICS.record_miss()
                 logger.error(f"request_error user_id={self.user_id} error={e}")
 
-            response_time = (time.time() - start_time) * 1000
+            request_completed_at: datetime = datetime.now()
+            duration_ms = (time.time() - start_time) * 1000
+
+            # Record detailed metrics
+            DETAILED_METRICS.record(RequestMetric(
+                request_started_at=request_started_at,
+                request_completed_at=request_completed_at,
+                duration_ms=duration_ms,
+                concurrent_users=int(os.environ.get("GENIE_USER_COUNT", "1")),
+                user=f"user_{self.user_id}",
+                prompt=content,
+                source_conversation_id=conversation.get("id"),
+                source_message_id=msg.get("message_id"),
+                genie_conversation_id=response.conversation_id if response else None,
+                genie_message_id=response.message_id if response else None,
+                message_index=i,
+                sql=response.query if response else None,
+                response_size=response_length,
+                success=exception is None,
+                error=str(exception) if exception else None,
+            ))
 
             events.request.fire(
                 request_type=request_type,
                 name=f"message_{i+1}_of_{len(messages)}",
-                response_time=response_time,
+                response_time=duration_ms,
                 response_length=response_length,
                 exception=exception,
             )
@@ -372,3 +406,18 @@ def on_test_stop(environment: Any, **kwargs: Any) -> None:
         f"semantic_hits={cache_summary['semantic_hits']} semantic_hit_rate={cache_summary['semantic_hit_rate']:.1f}% "
         f"misses={cache_summary['misses']} miss_rate={cache_summary['miss_rate']:.1f}%"
     )
+    
+    # Write detailed metrics to CSV in results directory
+    os.makedirs("results", exist_ok=True)
+    csv_path = generate_metrics_filename()
+    records_written = DETAILED_METRICS.to_csv(csv_path)
+    if records_written > 0:
+        logger.info(f"Detailed metrics written to {csv_path} ({records_written} records)")
+        summary = DETAILED_METRICS.get_summary()
+        logger.info(
+            f"Metrics summary: {summary['successful_requests']}/{summary['total_requests']} successful "
+            f"({summary['success_rate']:.1f}%), avg {summary['avg_execution_time_ms']:.0f}ms"
+        )
+    
+    # Export to Unity Catalog if running in Databricks notebook
+    export_to_unity_catalog_if_available()
