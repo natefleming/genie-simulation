@@ -267,7 +267,9 @@ class GenieLoadTestUser(User):
             duration_ms = (time.time() - start_time) * 1000  # Convert to ms
 
             # Record detailed metrics
+            run_id = os.path.basename(os.environ.get("GENIE_RESULTS_DIR", "unknown_run"))
             DETAILED_METRICS.record(RequestMetric(
+                run_id=run_id,
                 request_started_at=request_started_at,
                 request_completed_at=request_completed_at,
                 duration_ms=duration_ms,
