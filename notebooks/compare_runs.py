@@ -7,7 +7,7 @@
 # MAGIC 
 # MAGIC ## Usage
 # MAGIC 1. Run multiple load tests with different user counts (e.g., 5, 10, 20 users)
-# MAGIC 2. Enter the results directory paths below (one per line)
+# MAGIC 2. Enter the results directory paths below (comma-separated)
 # MAGIC 3. Run all cells to see the combined analysis
 # MAGIC 
 # MAGIC ## Output
@@ -73,17 +73,17 @@ for i, d in enumerate(available_dirs[:20]):
 
 # COMMAND ----------
 
-# Widget for selecting multiple results directories (one per line)
-default_dirs = "\n".join(available_dirs[:3]) if len(available_dirs) >= 3 else "\n".join(available_dirs)
+# Widget for selecting multiple results directories (comma-separated)
+default_dirs = ", ".join(available_dirs[:3]) if len(available_dirs) >= 3 else ", ".join(available_dirs)
 
-dbutils.widgets.multiline("results_dirs", default_dirs, "Results Directories (one per line)")
+dbutils.widgets.text("results_dirs", default_dirs, "Results Directories (comma-separated)")
 dbutils.widgets.text("space_id_filter", "", "Filter by Space ID (leave blank for all)")
 
 # COMMAND ----------
 
-# Parse selected directories
+# Parse selected directories (comma-separated)
 results_dirs_text = dbutils.widgets.get("results_dirs")
-results_dirs = [d.strip() for d in results_dirs_text.strip().split("\n") if d.strip()]
+results_dirs = [d.strip() for d in results_dirs_text.strip().split(",") if d.strip()]
 
 print(f"Selected {len(results_dirs)} directories for comparison:")
 for d in results_dirs:
