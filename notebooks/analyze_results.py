@@ -286,7 +286,7 @@ import matplotlib.pyplot as plt
 
 # Create images directory in results
 images_dir = Path(results_dir) / "images"
-images_dir.mkdir(exist_ok=True)
+images_dir.mkdir(parents=True, exist_ok=True)
 
 if not detailed_metrics_df.empty:
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
