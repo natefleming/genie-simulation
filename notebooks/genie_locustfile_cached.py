@@ -283,6 +283,9 @@ class CachedGenieLoadTestUser(User):
             f"messages={len(messages)}"
         )
 
+        # Track the active conversation ID for this session (starts as None)
+        active_conversation_id: str | None = None
+
         for i, msg in enumerate(messages):
             content: str = msg.get("content", "")
             if not content:
@@ -296,10 +299,15 @@ class CachedGenieLoadTestUser(User):
             request_type: str = "GENIE_LIVE"
 
             try:
-                result: CacheResult = self.genie_service.ask_question(content)
+                # Use None for first message, then use returned conversation_id
+                result: CacheResult = self.genie_service.ask_question(content, active_conversation_id)
                 
                 response: GenieResponse = result.response
                 response_length = len(str(response)) if response else 0
+                
+                # Capture conversation_id for subsequent messages in this conversation
+                if response and response.conversation_id:
+                    active_conversation_id = response.conversation_id
                 
                 if result.cache_hit:
                     served_by = (result.served_by or "").lower()

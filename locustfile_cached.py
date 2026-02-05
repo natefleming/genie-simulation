@@ -413,6 +413,9 @@ class CachedGenieLoadTestUser(User):
 
         wait_time_before: float = 0.0
         
+        # Track the active conversation ID for this session (starts as None)
+        active_conversation_id: str | None = None
+        
         for i, msg in enumerate(messages):
             content: str = msg.get("content", "")
             if not content:
@@ -448,11 +451,23 @@ class CachedGenieLoadTestUser(User):
 
             try:
                 # Send the question through the cache service
-                result: CacheResult = self.genie_service.ask_question(content)
+                # Use None for first message, then use returned conversation_id
+                result: CacheResult = self.genie_service.ask_question(content, active_conversation_id)
                 
                 response: GenieResponse = result.response
                 response_length = len(str(response)) if response else 0
                 response_time_secs: float = time.time() - start_time
+                
+                # Capture conversation_id for subsequent messages in this conversation
+                if response and response.conversation_id:
+                    active_conversation_id = response.conversation_id
+                    if i == 0:  # Log when starting new conversation
+                        logger.debug(
+                            "Started new Genie conversation",
+                            user=self.user_id,
+                            genie_conversation_id=active_conversation_id,
+                            source_conversation_id=conversation_id,
+                        )
                 
                 # Determine cache status from result
                 # CacheResult has cache_hit (bool) and served_by (str | None)
