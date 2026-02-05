@@ -154,91 +154,26 @@ results = run_in_memory_semantic_load_test(
 
 # MAGIC %md
 # MAGIC ## Results
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ### Summary Statistics
 # MAGIC 
-# MAGIC Look for request types:
+# MAGIC Results have been saved to a timestamped directory. Use the **analyze_results** notebook to 
+# MAGIC view detailed analysis and visualizations.
+# MAGIC 
+# MAGIC Look for request types in the results:
 # MAGIC - **GENIE_LRU_HIT**: Served from L1 LRU cache (fastest, ~1-10ms)
 # MAGIC - **GENIE_SEMANTIC_HIT**: Served from in-memory semantic cache (~100-500ms)
 # MAGIC - **GENIE_LIVE**: Cache miss, fetched from Genie API (~5-30s)
 
 # COMMAND ----------
 
-if not results.stats_df.empty:
-    display(results.stats_df)
-else:
-    print("No stats available")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ### Failures
-
-# COMMAND ----------
-
-if not results.failures_df.empty:
-    display(results.failures_df)
-else:
-    print("No failures recorded")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ### Exceptions
-
-# COMMAND ----------
-
-if not results.exceptions_df.empty:
-    display(results.exceptions_df)
-else:
-    print("No exceptions recorded")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ### Response Time History
-
-# COMMAND ----------
-
-if not results.stats_history_df.empty:
-    display(results.stats_history_df.tail(20))
-else:
-    print("No history available")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Recover Results (if notebook crashed)
-# MAGIC 
-# MAGIC If the notebook crashes after the load test completes but before results are displayed,
-# MAGIC you can recover the results by running this cell. The CSV files persist on disk.
-
-# COMMAND ----------
-
-# Uncomment and run this cell to recover results after a crash:
-
-# from genie_simulation.notebook_runner import read_results_from_csv, print_results_summary
-# 
-# # Option 1: Print formatted summary
-# print_results_summary("genie_in_memory_semantic_loadtest")
-# 
-# # Option 2: Get DataFrames for analysis
-# results = read_results_from_csv("genie_in_memory_semantic_loadtest")
-# display(results.stats_df)
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## Clean Up
-
-# COMMAND ----------
-
-from genie_simulation.notebook_runner import cleanup_csv_files
-
-cleanup_csv_files("genie_in_memory_semantic_loadtest")
+print(f"Results saved to: {results.results_dir}")
+print("\nFiles in results directory:")
+print(f"  - stats.csv: Locust summary statistics")
+print(f"  - stats_history.csv: Time-series throughput data")
+print(f"  - failures.csv: Request failures (if any)")
+print(f"  - exceptions.csv: Exceptions (if any)")
+print(f"  - detailed_metrics.csv: Per-request detailed metrics")
+print("\nTo analyze results, run the analyze_results notebook with:")
+print(f'  results_dir = "{results.results_dir}"')
 
 # COMMAND ----------
 
