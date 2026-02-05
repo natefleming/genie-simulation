@@ -48,6 +48,7 @@ dbutils.library.restartPython()
 
 # COMMAND ----------
 
+dbutils.widgets.text("space_id", "", "Genie Space ID (leave blank for .env value)")
 dbutils.widgets.text("conversations_file", "../conversations.yaml", "Conversations File Path")
 dbutils.widgets.text("user_count", "10", "Number of Concurrent Users")
 dbutils.widgets.text("spawn_rate", "2", "User Spawn Rate (per second)")
@@ -88,11 +89,15 @@ conversations_file = (
     else config.conversations_file
 )
 
+# Use widget space_id if provided, otherwise use .env value
+widget_space_id = dbutils.widgets.get("space_id")
+space_id = widget_space_id if widget_space_id else config.space_id
+
 print("\nConfiguration:")
 print("=" * 60)
 print("\nGeneral Settings:")
 print("-" * 60)
-print(f"Space ID: {config.space_id}")
+print(f"Space ID: {space_id}")
 print(f"Conversations File: {conversations_file}")
 print(f"Wait Time: {config.min_wait}s - {config.max_wait}s")
 if config.sample_size:
@@ -128,7 +133,7 @@ databricks_token = ctx.apiToken().get()
 
 results = run_in_memory_semantic_load_test(
     conversations_file=conversations_file,
-    space_id=config.space_id,
+    space_id=space_id,
     warehouse_id=cache_config.warehouse_id,
     user_count=user_count,
     spawn_rate=spawn_rate,

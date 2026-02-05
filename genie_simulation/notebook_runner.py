@@ -31,20 +31,21 @@ from typing import Any
 import pandas as pd
 
 
-def generate_results_dir(base_prefix: str, user_count: int, run_time: str) -> str:
+def generate_results_dir(base_prefix: str, space_id: str, user_count: int, run_time: str) -> str:
     """
     Generate a results directory path with config and timestamp.
     
     Args:
         base_prefix: Base prefix for the directory (e.g., "genie_loadtest")
+        space_id: Genie space ID
         user_count: Number of concurrent users in the simulation
         run_time: Duration of the test (e.g., "60s", "5m")
     
     Returns:
-        Directory path like "results/genie_loadtest_5users_60s_20260204_153045"
+        Directory path like "results/genie_loadtest_01JCQK9M123_5users_60s_20260204_153045"
     """
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    return f"results/{base_prefix}_{user_count}users_{run_time}_{timestamp}"
+    return f"results/{base_prefix}_{space_id}_{user_count}users_{run_time}_{timestamp}"
 
 
 @dataclass
@@ -158,7 +159,7 @@ def run_load_test(
     env["GENIE_RUN_TIME"] = run_time
     
     # Generate results directory with config suffix
-    results_dir = generate_results_dir(csv_prefix, user_count, run_time)
+    results_dir = generate_results_dir(csv_prefix, space_id, user_count, run_time)
     
     # Pass results directory to locustfile for detailed metrics
     env["GENIE_RESULTS_DIR"] = results_dir
@@ -370,7 +371,7 @@ def run_cached_load_test(
     env["GENIE_RUN_TIME"] = run_time
     
     # Generate results directory with config suffix
-    results_dir = generate_results_dir(csv_prefix, user_count, run_time)
+    results_dir = generate_results_dir(csv_prefix, space_id, user_count, run_time)
     
     # Pass results directory to locustfile for detailed metrics
     env["GENIE_RESULTS_DIR"] = results_dir
@@ -538,7 +539,7 @@ def run_in_memory_semantic_load_test(
     env["GENIE_RUN_TIME"] = run_time
     
     # Generate results directory with config suffix
-    results_dir = generate_results_dir(csv_prefix, user_count, run_time)
+    results_dir = generate_results_dir(csv_prefix, space_id, user_count, run_time)
     
     # Pass results directory to locustfile for detailed metrics
     env["GENIE_RESULTS_DIR"] = results_dir
