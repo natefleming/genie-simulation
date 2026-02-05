@@ -15,7 +15,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install pandas matplotlib seaborn scipy --quiet --upgrade
+# MAGIC %pip install pandas matplotlib seaborn scipy python-dotenv --quiet --upgrade
 
 # COMMAND ----------
 
@@ -32,7 +32,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+from dotenv import load_dotenv
 from scipy import stats
+
+# Load environment variables from .env file
+# Try multiple paths since CWD varies between local and Databricks environments
+load_dotenv("../.env")
+load_dotenv(".env")
 
 # COMMAND ----------
 
@@ -90,7 +96,7 @@ if available_dirs:
         print(f"      Space: {metadata['space_id']}, Users: {metadata['users']}, Modified: {mtime}")
 else:
     print("  (No results directories found)")
-    print(f"\n  Searched in: {possible_bases}")
+    print(f"\n  Searched in: {results_base}")
     print(f"\n  Looking for directories matching: genie_*")
 
 # COMMAND ----------
@@ -101,6 +107,14 @@ default_dirs = ", ".join(available_dirs)
 
 dbutils.widgets.text("results_dirs", default_dirs, "Results Directories (comma-separated, results/ prefix optional)")
 dbutils.widgets.text("space_id_filter", "", "Filter by Space ID (leave blank for all)")
+
+# Widget for SQL warehouse ID (used for enrichment with query.history and access.audit)
+default_warehouse_id = os.environ.get("GENIE_WAREHOUSE_ID", "")
+dbutils.widgets.text("warehouse_id", default_warehouse_id, "SQL Warehouse ID (for enrichment)")
+
+# Widget for system catalog (defaults to "system", can be a view catalog)
+default_system_catalog = os.environ.get("SYSTEM_CATALOG", "system")
+dbutils.widgets.text("system_catalog", default_system_catalog, "System Catalog (default: system)")
 
 # COMMAND ----------
 
@@ -223,6 +237,54 @@ print(f"\nTotal records: {len(combined_df)}")
 print(f"Unique runs: {combined_df['run_id'].nunique()}")
 print(f"Space IDs: {sorted(combined_df['space_id'].unique())}")
 print(f"Concurrent user levels: {sorted(combined_df['concurrent_users'].unique())}")
+
+# COMMAND ----------
+
+# Enrich each directory's metrics if needed
+warehouse_id = dbutils.widgets.get("warehouse_id").strip() or os.environ.get("GENIE_WAREHOUSE_ID", "")
+system_catalog = dbutils.widgets.get("system_catalog").strip() or os.environ.get("SYSTEM_CATALOG", "system")
+
+if warehouse_id:
+    import sys
+    sys.path.insert(0, "..")  # Add parent directory to path for genie_simulation module
+    from genie_simulation.enrich_metrics import enrich_results_directory
+
+    any_enriched = False
+    for dir_path in results_dirs:
+        metrics_path = Path(dir_path) / "detailed_metrics.csv"
+        if not metrics_path.exists():
+            continue
+        check_df = pd.read_csv(metrics_path)
+        sql_count = check_df['sql'].notna().sum() if 'sql' in check_df.columns else 0
+        enriched_count = check_df['sql_total_duration_ms'].notna().sum() if 'sql_total_duration_ms' in check_df.columns else 0
+        if sql_count > 0 and enriched_count == 0:
+            print(f"Enriching {dir_path}...")
+            try:
+                enrich_results_directory(
+                    results_dir=dir_path,
+                    warehouse_id=warehouse_id,
+                    system_catalog=system_catalog,
+                )
+                any_enriched = True
+            except Exception as e:
+                print(f"  Enrichment failed for {dir_path}: {e}")
+    
+    if any_enriched:
+        # Reload combined data
+        dfs = []
+        for dir_path in results_dirs:
+            metrics_path = Path(dir_path) / "detailed_metrics.csv"
+            if metrics_path.exists():
+                df = pd.read_csv(metrics_path)
+                if 'run_id' not in df.columns:
+                    df['run_id'] = os.path.basename(dir_path)
+                dfs.append(df)
+        combined_df = pd.concat(dfs, ignore_index=True)
+        if space_id_filter:
+            combined_df = combined_df[combined_df['space_id'] == space_id_filter]
+        print(f"\nReloaded {len(combined_df)} records after enrichment")
+else:
+    print("No warehouse ID provided - skipping enrichment")
 
 # COMMAND ----------
 
@@ -715,6 +777,183 @@ if 'concurrent_users' in available_cols and 'duration_ms' in available_cols:
         print(f"   Moderate correlation between users and latency (r={corr:.3f})")
     else:
         print(f"   Weak correlation between users and latency (r={corr:.3f})")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## SQL Execution Metrics Comparison
+# MAGIC
+# MAGIC **What it shows:** How SQL execution metrics from `system.query.history` change across
+# MAGIC concurrency levels. Includes time breakdown, AI overhead, and bottleneck analysis.
+# MAGIC
+# MAGIC **Data sources:**
+# MAGIC - `system.query.history`: SQL execution, compilation, queue, compute wait times
+# MAGIC - `system.access.audit`: AI overhead (NL-to-SQL inference time)
+
+# COMMAND ----------
+
+# Check if SQL execution metrics are available
+has_sql_metrics = 'sql_total_duration_ms' in combined_df.columns and combined_df['sql_total_duration_ms'].notna().any()
+
+if has_sql_metrics:
+    sql_df = combined_df[combined_df['sql_total_duration_ms'].notna()].copy()
+    
+    print("=" * 80)
+    print("SQL EXECUTION METRICS COMPARISON ACROSS CONCURRENCY LEVELS")
+    print("=" * 80)
+    
+    # SQL time breakdown by concurrency level
+    sql_cols = {
+        'sql_execution_time_ms': 'Execution',
+        'sql_compilation_time_ms': 'Compilation',
+        'sql_queue_wait_ms': 'Queue Wait',
+        'sql_compute_wait_ms': 'Compute Wait',
+        'sql_result_fetch_ms': 'Result Fetch',
+    }
+    
+    available_sql_cols = {k: v for k, v in sql_cols.items() if k in sql_df.columns}
+    
+    print(f"\n{'Users':<10}", end="")
+    for label in available_sql_cols.values():
+        print(f" {label:>14}", end="")
+    if 'ai_overhead_ms' in sql_df.columns:
+        print(f" {'AI Overhead':>14}", end="")
+    print(f" {'SQL Total':>14} {'E2E Total':>14}")
+    print("-" * (10 + 14 * (len(available_sql_cols) + 2 + (1 if 'ai_overhead_ms' in sql_df.columns else 0))))
+    
+    for users in sorted(sql_df['concurrent_users'].unique()):
+        user_df = sql_df[sql_df['concurrent_users'] == users]
+        print(f"{users:<10}", end="")
+        for col in available_sql_cols.keys():
+            avg_val = user_df[col].mean() / 1000 if col in user_df.columns else 0
+            print(f" {avg_val:>13.2f}s", end="")
+        if 'ai_overhead_ms' in sql_df.columns:
+            avg_ai = user_df['ai_overhead_ms'].mean() / 1000 if user_df['ai_overhead_ms'].notna().any() else 0
+            print(f" {avg_ai:>13.2f}s", end="")
+        avg_sql_total = user_df['sql_total_duration_ms'].mean() / 1000
+        avg_e2e = user_df['duration_ms'].mean() / 1000
+        print(f" {avg_sql_total:>13.2f}s {avg_e2e:>13.2f}s")
+    
+    # Visualization: SQL time breakdown stacked by concurrency
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    
+    user_levels = sorted(sql_df['concurrent_users'].unique())
+    
+    # 1. Stacked bar: Time breakdown per concurrency level
+    ax1 = axes[0, 0]
+    breakdown_data = {}
+    for col, label in available_sql_cols.items():
+        breakdown_data[label] = [sql_df[sql_df['concurrent_users'] == u][col].mean() / 1000 for u in user_levels]
+    if 'ai_overhead_ms' in sql_df.columns:
+        breakdown_data['AI Overhead'] = [
+            sql_df[(sql_df['concurrent_users'] == u) & sql_df['ai_overhead_ms'].notna()]['ai_overhead_ms'].mean() / 1000
+            if sql_df[(sql_df['concurrent_users'] == u) & sql_df['ai_overhead_ms'].notna()].shape[0] > 0 else 0
+            for u in user_levels
+        ]
+    
+    bottom = np.zeros(len(user_levels))
+    colors_stacked = ['#2ecc71', '#3498db', '#f39c12', '#9b59b6', '#1abc9c', '#e74c3c']
+    for i, (label, vals) in enumerate(breakdown_data.items()):
+        vals_clean = [v if not np.isnan(v) else 0 for v in vals]
+        ax1.bar([str(u) for u in user_levels], vals_clean, bottom=bottom,
+               label=label, color=colors_stacked[i % len(colors_stacked)], edgecolor='black', alpha=0.8)
+        bottom += np.array(vals_clean)
+    ax1.set_xlabel('Concurrent Users')
+    ax1.set_ylabel('Time (seconds)')
+    ax1.set_title('Average Time Breakdown by Concurrency')
+    ax1.legend(loc='upper left', fontsize=8)
+    ax1.grid(True, alpha=0.3, axis='y')
+    
+    # 2. SQL total time percentiles across concurrency
+    ax2 = axes[0, 1]
+    percentiles_data = {
+        'P50': [], 'P90': [], 'P95': [], 'P99': []
+    }
+    for u in user_levels:
+        user_sql = sql_df[sql_df['concurrent_users'] == u]['sql_total_duration_ms'] / 1000
+        percentiles_data['P50'].append(user_sql.quantile(0.50))
+        percentiles_data['P90'].append(user_sql.quantile(0.90))
+        percentiles_data['P95'].append(user_sql.quantile(0.95))
+        percentiles_data['P99'].append(user_sql.quantile(0.99))
+    
+    x = range(len(user_levels))
+    width = 0.2
+    for i, (label, vals) in enumerate(percentiles_data.items()):
+        ax2.bar([xi + i * width for xi in x], vals, width, label=label, alpha=0.8)
+    ax2.set_xlabel('Concurrent Users')
+    ax2.set_ylabel('SQL Total Time (seconds)')
+    ax2.set_title('SQL Total Time Percentiles by Concurrency')
+    ax2.set_xticks([xi + 1.5 * width for xi in x])
+    ax2.set_xticklabels([str(u) for u in user_levels])
+    ax2.legend()
+    ax2.grid(True, alpha=0.3, axis='y')
+    
+    # 3. Bottleneck distribution across concurrency
+    ax3 = axes[1, 0]
+    if 'sql_bottleneck' in sql_df.columns and sql_df['sql_bottleneck'].notna().any():
+        bottleneck_data = {}
+        for u in user_levels:
+            user_bottlenecks = sql_df[sql_df['concurrent_users'] == u]['sql_bottleneck'].value_counts(normalize=True) * 100
+            bottleneck_data[str(u)] = user_bottlenecks
+        
+        bottleneck_df_chart = pd.DataFrame(bottleneck_data).fillna(0)
+        bottleneck_df_chart.T.plot(kind='bar', stacked=True, ax=ax3, edgecolor='black', alpha=0.8)
+        ax3.set_xlabel('Concurrent Users')
+        ax3.set_ylabel('Percentage')
+        ax3.set_title('Bottleneck Distribution by Concurrency')
+        ax3.legend(loc='upper left', fontsize=7, ncol=2)
+        ax3.set_xticklabels(ax3.get_xticklabels(), rotation=0)
+        ax3.grid(True, alpha=0.3, axis='y')
+    else:
+        ax3.text(0.5, 0.5, 'No bottleneck data available', ha='center', va='center', transform=ax3.transAxes)
+        ax3.set_title('Bottleneck Distribution by Concurrency')
+    
+    # 4. Speed category distribution across concurrency
+    ax4 = axes[1, 1]
+    if 'sql_speed_category' in sql_df.columns and sql_df['sql_speed_category'].notna().any():
+        speed_data = {}
+        speed_order = ['FAST', 'MODERATE', 'SLOW', 'CRITICAL']
+        speed_colors_chart = {'FAST': '#2ecc71', 'MODERATE': '#f39c12', 'SLOW': '#e67e22', 'CRITICAL': '#e74c3c'}
+        
+        for u in user_levels:
+            user_speeds = sql_df[sql_df['concurrent_users'] == u]['sql_speed_category'].value_counts(normalize=True) * 100
+            speed_data[str(u)] = user_speeds
+        
+        speed_df_chart = pd.DataFrame(speed_data).reindex(speed_order).fillna(0)
+        speed_df_chart.T.plot(kind='bar', stacked=True, ax=ax4,
+                             color=[speed_colors_chart[s] for s in speed_order if s in speed_df_chart.index],
+                             edgecolor='black', alpha=0.8)
+        ax4.set_xlabel('Concurrent Users')
+        ax4.set_ylabel('Percentage')
+        ax4.set_title('Speed Category Distribution by Concurrency')
+        ax4.legend(loc='upper left', fontsize=8)
+        ax4.set_xticklabels(ax4.get_xticklabels(), rotation=0)
+        ax4.grid(True, alpha=0.3, axis='y')
+    else:
+        ax4.text(0.5, 0.5, 'No speed category data available', ha='center', va='center', transform=ax4.transAxes)
+        ax4.set_title('Speed Category Distribution by Concurrency')
+    
+    plt.tight_layout()
+    fig.savefig(comparison_dir / "sql_metrics_comparison.png", dpi=150, bbox_inches='tight')
+    print(f"\nSaved: {comparison_dir / 'sql_metrics_comparison.png'}")
+    plt.show()
+    
+    # AI overhead comparison
+    if 'ai_overhead_ms' in sql_df.columns and sql_df['ai_overhead_ms'].notna().any():
+        print(f"\n{'AI OVERHEAD BY CONCURRENCY (seconds)':<40}")
+        print("-" * 60)
+        for users in user_levels:
+            user_df = sql_df[(sql_df['concurrent_users'] == users) & sql_df['ai_overhead_ms'].notna()]
+            if len(user_df) > 0:
+                ai_mean = user_df['ai_overhead_ms'].mean() / 1000
+                ai_p50 = user_df['ai_overhead_ms'].median() / 1000
+                ai_p90 = user_df['ai_overhead_ms'].quantile(0.90) / 1000
+                print(f"  {users:>3} users:  mean={ai_mean:.2f}s  median={ai_p50:.2f}s  P90={ai_p90:.2f}s  ({len(user_df)} samples)")
+    
+    print(f"\n✓ SQL execution metrics comparison complete")
+else:
+    print("No SQL execution metrics available for comparison")
+    print("Run enrichment with a warehouse ID to populate SQL metrics")
 
 # COMMAND ----------
 

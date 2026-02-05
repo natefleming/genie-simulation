@@ -23,7 +23,6 @@ Usage:
 
 import hashlib
 import os
-import re
 import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -48,8 +47,12 @@ class SQLExecutionMetrics:
         - result_fetch_ms: Time fetching results (result_fetch_duration_ms)
         - rows_produced: Number of rows returned (produced_rows)
         - bytes_read: Bytes read from storage (read_bytes)
+        - rows_read: Rows scanned from storage (read_rows)
         - execution_status: Query status (execution_status)
+        - error_message: Error details if failed (error_message)
+        - warehouse_id: Which warehouse ran query (compute.warehouse_id)
         - genie_space_id: Genie space that originated query (query_source.genie_space_id)
+        - genie_conversation_id: Conversation ID (query_source.genie_conversation_id)
     """
     
     statement_id: str
@@ -64,7 +67,11 @@ class SQLExecutionMetrics:
     start_time: datetime
     end_time: datetime
     execution_status: str
+    rows_read: int = 0
+    error_message: Optional[str] = None
+    warehouse_id: Optional[str] = None
     genie_space_id: Optional[str] = None
+    genie_conversation_id: Optional[str] = None
 
 
 class QueryHistoryClient:
@@ -151,8 +158,10 @@ class QueryHistoryClient:
         start_ts = start_time.strftime("%Y-%m-%d %H:%M:%S")
         end_ts = end_time.strftime("%Y-%m-%d %H:%M:%S")
         
-        # Escape single quotes in SQL text for the LIKE comparison
+        # Escape special characters for the LIKE comparison
         escaped_sql = sql_text.replace("'", "''")
+        # Escape SQL LIKE wildcards to avoid incorrect matches
+        escaped_sql = escaped_sql.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         # Take first 200 chars for matching to avoid issues with very long queries
         sql_prefix = escaped_sql[:200] if len(escaped_sql) > 200 else escaped_sql
         
@@ -179,10 +188,14 @@ class QueryHistoryClient:
             COALESCE(result_fetch_duration_ms, 0) as result_fetch_ms,
             COALESCE(produced_rows, 0) as rows_produced,
             COALESCE(read_bytes, 0) as bytes_read,
+            COALESCE(read_rows, 0) as rows_read,
             start_time,
             end_time,
             execution_status,
-            query_source.genie_space_id as genie_space_id
+            error_message,
+            compute.warehouse_id as warehouse_id,
+            query_source.genie_space_id as genie_space_id,
+            query_source.genie_conversation_id as genie_conversation_id
         FROM {self.system_catalog}.query.history
         WHERE start_time >= '{start_ts}'
           AND start_time <= '{end_ts}'
@@ -202,10 +215,6 @@ class QueryHistoryClient:
             if response.status and response.status.state == StatementState.SUCCEEDED:
                 if response.result and response.result.data_array:
                     row = response.result.data_array[0]
-                    # Column order: statement_id, total_duration_ms, execution_duration_ms,
-                    #               compilation_duration_ms, queue_wait_ms, compute_wait_ms,
-                    #               result_fetch_ms, rows_produced, bytes_read,
-                    #               start_time, end_time, execution_status, genie_space_id
                     metrics = SQLExecutionMetrics(
                         statement_id=str(row[0]) if row[0] else "",
                         total_duration_ms=float(row[1]) if row[1] else 0.0,
@@ -216,10 +225,14 @@ class QueryHistoryClient:
                         result_fetch_ms=float(row[6]) if row[6] else 0.0,
                         rows_produced=int(row[7]) if row[7] else 0,
                         bytes_read=int(row[8]) if row[8] else 0,
-                        start_time=datetime.fromisoformat(str(row[9])) if row[9] else start_time,
-                        end_time=datetime.fromisoformat(str(row[10])) if row[10] else end_time,
-                        execution_status=str(row[11]) if row[11] else "UNKNOWN",
-                        genie_space_id=str(row[12]) if row[12] else None,
+                        rows_read=int(row[9]) if row[9] else 0,
+                        start_time=datetime.fromisoformat(str(row[10])) if row[10] else start_time,
+                        end_time=datetime.fromisoformat(str(row[11])) if row[11] else end_time,
+                        execution_status=str(row[12]) if row[12] else "UNKNOWN",
+                        error_message=str(row[13]) if row[13] else None,
+                        warehouse_id=str(row[14]) if row[14] else None,
+                        genie_space_id=str(row[15]) if row[15] else None,
+                        genie_conversation_id=str(row[16]) if row[16] else None,
                     )
                     
                     # Cache the result
@@ -302,10 +315,14 @@ class QueryHistoryClient:
             COALESCE(result_fetch_duration_ms, 0) as result_fetch_ms,
             COALESCE(produced_rows, 0) as rows_produced,
             COALESCE(read_bytes, 0) as bytes_read,
+            COALESCE(read_rows, 0) as rows_read,
             start_time,
             end_time,
             execution_status,
-            query_source.genie_space_id as genie_space_id
+            error_message,
+            compute.warehouse_id as warehouse_id,
+            query_source.genie_space_id as genie_space_id,
+            query_source.genie_conversation_id as genie_conversation_id
         FROM {self.system_catalog}.query.history
         WHERE start_time >= '{start_ts}'
           AND start_time <= '{end_ts}'
@@ -325,11 +342,6 @@ class QueryHistoryClient:
             if response.status and response.status.state == StatementState.SUCCEEDED:
                 if response.result and response.result.data_array:
                     for row in response.result.data_array:
-                        # Column order: statement_id, statement_text, total_duration_ms,
-                        #               execution_duration_ms, compilation_duration_ms,
-                        #               queue_wait_ms, compute_wait_ms, result_fetch_ms,
-                        #               rows_produced, bytes_read, start_time, end_time,
-                        #               execution_status, genie_space_id
                         metrics = SQLExecutionMetrics(
                             statement_id=str(row[0]) if row[0] else "",
                             total_duration_ms=float(row[2]) if row[2] else 0.0,
@@ -340,10 +352,14 @@ class QueryHistoryClient:
                             result_fetch_ms=float(row[7]) if row[7] else 0.0,
                             rows_produced=int(row[8]) if row[8] else 0,
                             bytes_read=int(row[9]) if row[9] else 0,
-                            start_time=datetime.fromisoformat(str(row[10])) if row[10] else start_time,
-                            end_time=datetime.fromisoformat(str(row[11])) if row[11] else end_time,
-                            execution_status=str(row[12]) if row[12] else "UNKNOWN",
-                            genie_space_id=str(row[13]) if row[13] else None,
+                            rows_read=int(row[10]) if row[10] else 0,
+                            start_time=datetime.fromisoformat(str(row[11])) if row[11] else start_time,
+                            end_time=datetime.fromisoformat(str(row[12])) if row[12] else end_time,
+                            execution_status=str(row[13]) if row[13] else "UNKNOWN",
+                            error_message=str(row[14]) if row[14] else None,
+                            warehouse_id=str(row[15]) if row[15] else None,
+                            genie_space_id=str(row[16]) if row[16] else None,
+                            genie_conversation_id=str(row[17]) if row[17] else None,
                         )
                         results.append(metrics)
                         

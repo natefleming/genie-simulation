@@ -40,6 +40,12 @@ from pathlib import Path
 from typing import Optional
 
 import pandas as pd
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+# Try multiple paths since CWD varies between local and Databricks environments
+load_dotenv("../.env")
+load_dotenv(".env")
 
 # COMMAND ----------
 
@@ -81,17 +87,22 @@ default_dir = available_dirs[0] if available_dirs else ""
 
 dbutils.widgets.text("results_dir", default_dir, "Results Directory")
 
-# Widget for SQL warehouse ID (used for enrichment with system.query.history)
-import os
+# Widget for SQL warehouse ID (used for enrichment with query.history and access.audit)
 default_warehouse_id = os.environ.get("GENIE_WAREHOUSE_ID", "")
 dbutils.widgets.text("warehouse_id", default_warehouse_id, "SQL Warehouse ID (for enrichment)")
+
+# Widget for system catalog (defaults to "system", can be a view catalog)
+default_system_catalog = os.environ.get("SYSTEM_CATALOG", "system")
+dbutils.widgets.text("system_catalog", default_system_catalog, "System Catalog (default: system)")
 
 # COMMAND ----------
 
 results_dir = dbutils.widgets.get("results_dir")
-warehouse_id = dbutils.widgets.get("warehouse_id")
+warehouse_id = dbutils.widgets.get("warehouse_id").strip() or os.environ.get("GENIE_WAREHOUSE_ID", "")
+system_catalog = dbutils.widgets.get("system_catalog").strip() or os.environ.get("SYSTEM_CATALOG", "system")
 print(f"Analyzing results from: {results_dir}")
 print(f"SQL Warehouse ID: {warehouse_id if warehouse_id else '(not set - needed for SQL metrics enrichment)'}")
+print(f"System Catalog: {system_catalog}")
 
 # COMMAND ----------
 
@@ -1229,7 +1240,7 @@ if not detailed_metrics_df.empty:
         if enriched_count == 0 and sql_count > 0:
             enrichment_needed = True
             print(f"⚠️  SQL execution metrics are empty ({enriched_count}/{sql_count} rows enriched)")
-            print("   Attempting automatic enrichment from system.query.history...")
+            print(f"   Attempting automatic enrichment from {system_catalog}.query.history...")
         else:
             print(f"✓ SQL execution metrics present: {enriched_count}/{sql_count} rows ({enriched_count/sql_count*100:.1f}% coverage)")
     elif 'sql_execution_time_ms' in detailed_metrics_df.columns:
@@ -1238,7 +1249,7 @@ if not detailed_metrics_df.empty:
         if enriched_count == 0 and sql_count > 0:
             enrichment_needed = True
             print(f"⚠️  SQL execution metrics are empty ({enriched_count}/{sql_count} rows enriched)")
-            print("   Attempting automatic enrichment from system.query.history...")
+            print(f"   Attempting automatic enrichment from {system_catalog}.query.history...")
         else:
             print(f"✓ SQL execution metrics present: {enriched_count}/{sql_count} rows ({enriched_count/sql_count*100:.1f}% coverage)")
     elif sql_count > 0:
@@ -1280,6 +1291,7 @@ if enrichment_needed and warehouse_id:
         enriched_df = enrich_metrics_with_query_history(
             metrics_csv_path=str(metrics_path),
             warehouse_id=warehouse_id,
+            system_catalog=system_catalog,
         )
         
         # Reload the dataframe
@@ -1291,7 +1303,7 @@ if enrichment_needed and warehouse_id:
         print(f"❌ Enrichment failed: {e}")
         print("\n   Possible causes:")
         print("   - Invalid warehouse ID")
-        print("   - Insufficient permissions on system.query.history")
+        print(f"   - Insufficient permissions on {system_catalog}.query.history")
         print("   - Load test too recent (data not yet in system tables)")
 elif enrichment_needed and not warehouse_id:
     print("⚠️  SQL metrics enrichment skipped - no warehouse ID provided")
@@ -1337,7 +1349,7 @@ if not detailed_metrics_df.empty and has_sql_metrics:
     
     if len(sql_exec_df) > 0:
         print("=" * 70)
-        print("SQL EXECUTION METRICS (from system.query.history)")
+        print(f"SQL EXECUTION METRICS (from {system_catalog}.query.history)")
         print("=" * 70)
         
         # Calculate overhead (end-to-end time minus SQL total time in warehouse)
@@ -1488,13 +1500,231 @@ if not detailed_metrics_df.empty and has_sql_metrics:
         if avg_compute_wait > 0.5:
             print(f"\n⚠️  Significant compute startup wait ({avg_compute_wait:.2f}s avg)")
             print("  Consider using a serverless warehouse or increasing min clusters")
+
+        # Scan efficiency (rows_read vs rows_produced)
+        if 'sql_rows_read' in sql_exec_df.columns:
+            avg_rows_read = sql_exec_df['sql_rows_read'].mean()
+            avg_rows_produced_val = sql_exec_df['sql_rows_produced'].mean() if 'sql_rows_produced' in sql_exec_df.columns else 0
+            if avg_rows_read > 0 and avg_rows_produced_val > 0:
+                scan_ratio = avg_rows_read / avg_rows_produced_val
+                print(f"\n{'SCAN EFFICIENCY':<40}")
+                print("-" * 60)
+                print(f"{'  Avg Rows Scanned':<40} {avg_rows_read:>20.0f}")
+                print(f"{'  Avg Rows Returned':<40} {avg_rows_produced_val:>20.0f}")
+                print(f"{'  Scan Ratio (scanned/returned)':<40} {scan_ratio:>20.1f}x")
+                if scan_ratio > 100:
+                    print("  ⚠️  High scan ratio - consider adding filters or indexes")
             
     else:
         print("No SQL execution metrics available (column is empty)")
-        print("Run enrichment after waiting 15-30 minutes for system.query.history ingestion")
+        print(f"Run enrichment after waiting 15-30 minutes for {system_catalog}.query.history ingestion")
 else:
     print("No SQL execution metrics columns found in detailed_metrics.csv")
-    print("These metrics are populated by post-processing enrichment from system.query.history")
+    print(f"These metrics are populated by post-processing enrichment from {system_catalog}.query.history")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## AI Overhead Analysis (from system.access.audit)
+# MAGIC
+# MAGIC **What it shows:** The time Genie spends on AI inference (NL-to-SQL generation) before
+# MAGIC executing the first SQL query. This is calculated by correlating:
+# MAGIC - `system.access.audit`: When the Genie API received the user message
+# MAGIC - `system.query.history`: When the first SQL query started executing
+# MAGIC
+# MAGIC **AI Overhead = First Query Start - Message Event Time**
+# MAGIC
+# MAGIC **Why it matters:** This separates "thinking time" from "execution time":
+# MAGIC - **High AI overhead**: Genie is slow at generating SQL - may need prompt optimization
+# MAGIC - **Low AI overhead**: Genie generates SQL quickly - focus optimization on warehouse
+
+# COMMAND ----------
+
+if not detailed_metrics_df.empty and 'ai_overhead_ms' in detailed_metrics_df.columns:
+    ai_df = detailed_metrics_df[detailed_metrics_df['ai_overhead_ms'].notna()].copy()
+    
+    if len(ai_df) > 0:
+        print("=" * 70)
+        print(f"AI OVERHEAD ANALYSIS (from {system_catalog}.access.audit)")
+        print("=" * 70)
+        
+        ai_secs = ai_df['ai_overhead_ms'] / 1000
+        
+        print(f"\n{'Metric':<40} {'Value':>20}")
+        print("-" * 60)
+        print(f"{'Requests with AI overhead data':<40} {len(ai_df):>20}")
+        print(f"{'Coverage':<40} {f'{len(ai_df)/len(detailed_metrics_df)*100:.1f}%':>20}")
+        
+        print(f"\n{'AI OVERHEAD (seconds)':<40}")
+        print("-" * 60)
+        print(f"{'  Mean':<40} {ai_secs.mean():>19.2f}s")
+        print(f"{'  Median':<40} {ai_secs.median():>19.2f}s")
+        print(f"{'  P90':<40} {ai_secs.quantile(0.90):>19.2f}s")
+        print(f"{'  P95':<40} {ai_secs.quantile(0.95):>19.2f}s")
+        print(f"{'  P99':<40} {ai_secs.quantile(0.99):>19.2f}s")
+        
+        # Compare with SQL execution time
+        if 'sql_total_duration_ms' in ai_df.columns:
+            sql_total = ai_df['sql_total_duration_ms'] / 1000
+            total = ai_df['duration_ms'] / 1000
+            
+            avg_ai = ai_secs.mean()
+            avg_sql = sql_total.mean()
+            avg_total = total.mean()
+            avg_other = avg_total - avg_ai - avg_sql
+            
+            print(f"\n{'FULL TIME BREAKDOWN (seconds)':<40}")
+            print("-" * 60)
+            print(f"{'  AI Overhead (NL-to-SQL)':<40} {avg_ai:>19.2f}s ({avg_ai/avg_total*100:.1f}%)")
+            print(f"{'  SQL Execution (warehouse)':<40} {avg_sql:>19.2f}s ({avg_sql/avg_total*100:.1f}%)")
+            print(f"{'  Other (network, etc.)':<40} {max(0, avg_other):>19.2f}s ({max(0, avg_other)/avg_total*100:.1f}%)")
+            print(f"{'  Total (end-to-end)':<40} {avg_total:>19.2f}s")
+        
+        # Visualization
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        
+        ax1 = axes[0]
+        ax1.hist(ai_secs, bins=30, edgecolor='black', alpha=0.7, color='coral')
+        ax1.axvline(ai_secs.median(), color='red', linestyle='--',
+                   label=f'Median: {ai_secs.median():.2f}s')
+        ax1.set_xlabel('AI Overhead (seconds)')
+        ax1.set_ylabel('Frequency')
+        ax1.set_title('AI Overhead Distribution')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        # Stacked breakdown if we have all components
+        ax2 = axes[1]
+        if 'sql_total_duration_ms' in ai_df.columns:
+            categories = ['AI Overhead', 'SQL Warehouse', 'Other']
+            values_breakdown = [avg_ai, avg_sql, max(0, avg_other)]
+            colors_breakdown = ['#e74c3c', '#2ecc71', '#95a5a6']
+            ax2.bar(categories, values_breakdown, color=colors_breakdown, edgecolor='black', alpha=0.8)
+            ax2.set_ylabel('Time (seconds)')
+            ax2.set_title('Average End-to-End Breakdown')
+            ax2.grid(True, alpha=0.3, axis='y')
+            for i, v in enumerate(values_breakdown):
+                if v > 0.01:
+                    ax2.text(i, v + 0.02, f'{v:.2f}s', ha='center', fontsize=9)
+        
+        plt.tight_layout()
+        fig.savefig(images_dir / "ai_overhead_analysis.png", dpi=150, bbox_inches='tight')
+        print(f"\nSaved: {images_dir / 'ai_overhead_analysis.png'}")
+        plt.show()
+    else:
+        print("No AI overhead data available")
+        print(f"AI overhead requires {system_catalog}.access.audit data (enrichment with warehouse_id)")
+else:
+    print(f"No AI overhead data in metrics - this is computed from {system_catalog}.access.audit during enrichment")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## Bottleneck Classification and Speed Analysis
+# MAGIC
+# MAGIC **Bottleneck Classification** categorizes each query by its dominant time component:
+# MAGIC - **COMPUTE_STARTUP**: Waiting for warehouse compute resources (>50% of total)
+# MAGIC - **QUEUE_WAIT**: Waiting in queue at capacity (>30% of total)
+# MAGIC - **COMPILATION**: Query planning/compilation time (>40% of total)
+# MAGIC - **LARGE_SCAN**: Reading more than 1GB of data
+# MAGIC - **SLOW_EXECUTION**: Execution time exceeds 10 seconds
+# MAGIC - **NORMAL**: No single bottleneck dominates
+# MAGIC
+# MAGIC **Speed Categories**: FAST (<5s), MODERATE (5-10s), SLOW (10-30s), CRITICAL (>30s)
+
+# COMMAND ----------
+
+if not detailed_metrics_df.empty and 'sql_bottleneck' in detailed_metrics_df.columns:
+    bottleneck_df = detailed_metrics_df[detailed_metrics_df['sql_bottleneck'].notna()].copy()
+    
+    if len(bottleneck_df) > 0:
+        print("=" * 70)
+        print("BOTTLENECK CLASSIFICATION AND SPEED ANALYSIS")
+        print("=" * 70)
+        
+        # Bottleneck distribution
+        bottleneck_counts = bottleneck_df['sql_bottleneck'].value_counts()
+        print(f"\n{'Bottleneck Type':<30} {'Count':>10} {'%':>10}")
+        print("-" * 50)
+        for bottleneck, count in bottleneck_counts.items():
+            pct = count / len(bottleneck_df) * 100
+            print(f"{bottleneck:<30} {count:>10} {pct:>9.1f}%")
+        
+        # Speed category distribution
+        if 'sql_speed_category' in bottleneck_df.columns:
+            speed_counts = bottleneck_df['sql_speed_category'].value_counts()
+            print(f"\n{'Speed Category':<30} {'Count':>10} {'%':>10}")
+            print("-" * 50)
+            for category in ['FAST', 'MODERATE', 'SLOW', 'CRITICAL']:
+                count = speed_counts.get(category, 0)
+                pct = count / len(bottleneck_df) * 100
+                print(f"{category:<30} {count:>10} {pct:>9.1f}%")
+        
+        # Visualizations
+        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+        
+        # Bottleneck pie chart
+        ax1 = axes[0]
+        if len(bottleneck_counts) > 0:
+            ax1.pie(bottleneck_counts.values, labels=bottleneck_counts.index,
+                   autopct='%1.1f%%', startangle=90)
+            ax1.set_title(f'Bottleneck Distribution ({len(bottleneck_df)} queries)')
+        
+        # Speed category bar chart
+        ax2 = axes[1]
+        if 'sql_speed_category' in bottleneck_df.columns:
+            speed_order = ['FAST', 'MODERATE', 'SLOW', 'CRITICAL']
+            speed_colors = ['#2ecc71', '#f39c12', '#e67e22', '#e74c3c']
+            speed_vals = [speed_counts.get(c, 0) for c in speed_order]
+            ax2.bar(speed_order, speed_vals, color=speed_colors, edgecolor='black', alpha=0.8)
+            ax2.set_xlabel('Speed Category')
+            ax2.set_ylabel('Number of Queries')
+            ax2.set_title('Speed Category Distribution')
+            ax2.grid(True, alpha=0.3, axis='y')
+        
+        plt.tight_layout()
+        fig.savefig(images_dir / "bottleneck_speed_analysis.png", dpi=150, bbox_inches='tight')
+        print(f"\nSaved: {images_dir / 'bottleneck_speed_analysis.png'}")
+        plt.show()
+        
+        # Key insights
+        print("\n" + "=" * 60)
+        print("KEY INSIGHTS")
+        print("=" * 60)
+        
+        if 'NORMAL' in bottleneck_counts.index:
+            normal_pct = bottleneck_counts['NORMAL'] / len(bottleneck_df) * 100
+            print(f"\n  {normal_pct:.1f}% of queries have no dominant bottleneck (NORMAL)")
+        
+        problematic = bottleneck_counts.drop('NORMAL', errors='ignore')
+        if len(problematic) > 0:
+            top_bottleneck = problematic.index[0]
+            top_count = problematic.values[0]
+            top_pct = top_count / len(bottleneck_df) * 100
+            print(f"  Top bottleneck: {top_bottleneck} ({top_pct:.1f}% of queries)")
+            
+            if top_bottleneck == 'COMPUTE_STARTUP':
+                print("  Recommendation: Use serverless warehouse or increase min clusters")
+            elif top_bottleneck == 'QUEUE_WAIT':
+                print("  Recommendation: Scale warehouse or reduce concurrency")
+            elif top_bottleneck == 'COMPILATION':
+                print("  Recommendation: Simplify queries or optimize Genie instructions")
+            elif top_bottleneck == 'LARGE_SCAN':
+                print("  Recommendation: Add filters, optimize partitioning, or add indexes")
+            elif top_bottleneck == 'SLOW_EXECUTION':
+                print("  Recommendation: Optimize query logic or increase warehouse size")
+        
+        if 'sql_speed_category' in bottleneck_df.columns:
+            critical_count = speed_counts.get('CRITICAL', 0)
+            slow_count = speed_counts.get('SLOW', 0)
+            if critical_count > 0:
+                print(f"\n  ⚠️  {critical_count} queries are CRITICAL (>30s)")
+            if slow_count > 0:
+                print(f"  ⚡ {slow_count} queries are SLOW (10-30s)")
+    else:
+        print("No bottleneck data available - run enrichment first")
+else:
+    print("No bottleneck classification in metrics - this is computed during enrichment")
 
 # COMMAND ----------
 

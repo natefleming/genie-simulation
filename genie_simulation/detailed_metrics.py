@@ -36,11 +36,11 @@ class RequestMetric:
     response_size: int
     success: bool
     error: Optional[str]
-    # SQL execution metrics from system.query.history
-    # These are populated by post-processing enrichment (enrich_metrics.py)
-    # after waiting for system table ingestion (15-30 min delay)
+    # ---- Post-processing enrichment fields ----
+    # These are populated by enrich_metrics.py after waiting for system table
+    # ingestion (15-30 min delay). They are NOT set during load test execution.
     #
-    # Field mapping from system.query.history columns:
+    # From system.query.history:
     #   - statement_id -> sql_statement_id
     #   - total_duration_ms -> sql_total_duration_ms
     #   - execution_duration_ms -> sql_execution_time_ms
@@ -50,6 +50,16 @@ class RequestMetric:
     #   - result_fetch_duration_ms -> sql_result_fetch_ms
     #   - produced_rows -> sql_rows_produced
     #   - read_bytes -> sql_bytes_read
+    #   - read_rows -> sql_rows_read
+    #   - error_message -> sql_error_message
+    #   - compute.warehouse_id -> sql_warehouse_id
+    #
+    # From system.access.audit (correlated with query history):
+    #   - ai_overhead_ms: Time from message event to first SQL query start
+    #
+    # Derived metrics:
+    #   - sql_bottleneck: Classification (COMPUTE_STARTUP, QUEUE_WAIT, etc.)
+    #   - sql_speed_category: Speed bucket (FAST, MODERATE, SLOW, CRITICAL)
     sql_statement_id: Optional[str] = None  # Statement ID from query history
     sql_total_duration_ms: Optional[float] = None  # Total time query spent in warehouse
     sql_execution_time_ms: Optional[float] = None  # Time spent executing SQL in warehouse
@@ -59,6 +69,12 @@ class RequestMetric:
     sql_result_fetch_ms: Optional[float] = None  # Time fetching results
     sql_rows_produced: Optional[int] = None  # Number of rows returned by query
     sql_bytes_read: Optional[int] = None  # Bytes read during execution
+    sql_rows_read: Optional[int] = None  # Rows scanned (not returned) - scan efficiency
+    sql_error_message: Optional[str] = None  # Error message if query failed
+    sql_warehouse_id: Optional[str] = None  # Which warehouse ran the query
+    ai_overhead_ms: Optional[float] = None  # AI inference time (message -> first SQL)
+    sql_bottleneck: Optional[str] = None  # Bottleneck classification
+    sql_speed_category: Optional[str] = None  # Speed bucket (FAST/MODERATE/SLOW/CRITICAL)
 
 
 class DetailedMetricsCollector:
@@ -150,10 +166,15 @@ class DetailedMetricsCollector:
                     "concurrent_users", "user", "prompt", "source_conversation_id",
                     "source_message_id", "genie_conversation_id", "genie_message_id",
                     "message_index", "sql", "response_size", "success", "error",
-                    # SQL execution metrics from system.query.history (post-processing enrichment)
+                    # SQL execution metrics from system.query.history (post-processing)
                     "sql_statement_id", "sql_total_duration_ms", "sql_execution_time_ms",
                     "sql_compilation_time_ms", "sql_queue_wait_ms", "sql_compute_wait_ms",
-                    "sql_result_fetch_ms", "sql_rows_produced", "sql_bytes_read"
+                    "sql_result_fetch_ms", "sql_rows_produced", "sql_bytes_read",
+                    "sql_rows_read", "sql_error_message", "sql_warehouse_id",
+                    # AI overhead from system.access.audit (post-processing)
+                    "ai_overhead_ms",
+                    # Derived metrics (post-processing)
+                    "sql_bottleneck", "sql_speed_category"
                 ])
             return 0
         
