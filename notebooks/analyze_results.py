@@ -1197,6 +1197,173 @@ else:
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## SQL Execution Metrics (from system.query.history)
+# MAGIC
+# MAGIC **What it shows:** Actual SQL execution time in the warehouse as captured from the Databricks
+# MAGIC system.query.history table. This breaks down the end-to-end latency into:
+# MAGIC - **SQL Execution Time**: Time spent executing the query in the warehouse
+# MAGIC - **SQL Compilation Time**: Time spent planning/compiling the query
+# MAGIC - **Overhead Time**: End-to-end latency minus SQL execution (Genie processing, network, etc.)
+# MAGIC
+# MAGIC **Why it matters:** Understanding where time is spent helps identify optimization opportunities:
+# MAGIC - **High SQL execution time**: Optimize queries, add indexes, increase warehouse size
+# MAGIC - **High compilation time**: Query complexity issues, consider caching query plans
+# MAGIC - **High overhead**: Genie API latency, network issues, or processing bottlenecks
+# MAGIC
+# MAGIC **Key insights to look for:**
+# MAGIC - **SQL execution as % of total**: How much is warehouse vs Genie overhead?
+# MAGIC - **Rows produced vs latency**: Does more data = slower queries?
+# MAGIC - **Bytes read correlation**: I/O-bound vs compute-bound queries
+
+# COMMAND ----------
+
+if not detailed_metrics_df.empty and 'sql_execution_time_ms' in detailed_metrics_df.columns:
+    # Filter to rows with SQL execution metrics
+    sql_exec_df = detailed_metrics_df[detailed_metrics_df['sql_execution_time_ms'].notna()].copy()
+    
+    if len(sql_exec_df) > 0:
+        print("=" * 70)
+        print("SQL EXECUTION METRICS (from system.query.history)")
+        print("=" * 70)
+        
+        # Calculate overhead (total time - SQL execution time)
+        sql_exec_df['overhead_ms'] = sql_exec_df['duration_ms'] - sql_exec_df['sql_execution_time_ms']
+        sql_exec_df['sql_pct_of_total'] = (sql_exec_df['sql_execution_time_ms'] / sql_exec_df['duration_ms']) * 100
+        
+        # Summary statistics
+        total_requests = len(sql_exec_df)
+        total_with_metrics = sql_exec_df['sql_execution_time_ms'].notna().sum()
+        
+        print(f"\n{'Metric':<40} {'Value':>20}")
+        print("-" * 60)
+        print(f"{'Requests with SQL metrics':<40} {total_with_metrics:>20}")
+        print(f"{'Coverage':<40} {f'{total_with_metrics/len(detailed_metrics_df)*100:.1f}%':>20}")
+        
+        # Time breakdown
+        print(f"\n{'TIME BREAKDOWN (seconds)':<40}")
+        print("-" * 60)
+        avg_total = sql_exec_df['duration_ms'].mean() / 1000
+        avg_sql_exec = sql_exec_df['sql_execution_time_ms'].mean() / 1000
+        avg_compile = sql_exec_df['sql_compilation_time_ms'].mean() / 1000 if 'sql_compilation_time_ms' in sql_exec_df.columns else 0
+        avg_overhead = sql_exec_df['overhead_ms'].mean() / 1000
+        
+        print(f"{'  Total (end-to-end)':<40} {avg_total:>19.2f}s")
+        print(f"{'  SQL Execution':<40} {avg_sql_exec:>19.2f}s ({avg_sql_exec/avg_total*100:.1f}%)")
+        print(f"{'  SQL Compilation':<40} {avg_compile:>19.2f}s ({avg_compile/avg_total*100:.1f}%)")
+        print(f"{'  Overhead (Genie + network)':<40} {avg_overhead:>19.2f}s ({avg_overhead/avg_total*100:.1f}%)")
+        
+        # I/O metrics
+        if 'sql_bytes_read' in sql_exec_df.columns:
+            avg_bytes_read = sql_exec_df['sql_bytes_read'].mean()
+            avg_rows = sql_exec_df['sql_rows_produced'].mean() if 'sql_rows_produced' in sql_exec_df.columns else 0
+            
+            print(f"\n{'I/O METRICS':<40}")
+            print("-" * 60)
+            print(f"{'  Avg Bytes Read':<40} {avg_bytes_read/1024/1024:>18.2f} MB")
+            print(f"{'  Avg Rows Produced':<40} {avg_rows:>20.0f}")
+        
+        # Percentile breakdown
+        print(f"\n{'SQL EXECUTION TIME PERCENTILES':<40}")
+        print("-" * 60)
+        sql_exec_secs = sql_exec_df['sql_execution_time_ms'] / 1000
+        print(f"{'  P50 (Median)':<40} {sql_exec_secs.quantile(0.50):>19.2f}s")
+        print(f"{'  P90':<40} {sql_exec_secs.quantile(0.90):>19.2f}s")
+        print(f"{'  P95':<40} {sql_exec_secs.quantile(0.95):>19.2f}s")
+        print(f"{'  P99':<40} {sql_exec_secs.quantile(0.99):>19.2f}s")
+        
+        # Visualizations
+        fig, axes = plt.subplots(2, 2, figsize=(15, 10))
+        
+        # 1. Time breakdown stacked bar
+        ax1 = axes[0, 0]
+        categories = ['SQL Execution', 'SQL Compilation', 'Overhead']
+        values = [avg_sql_exec, avg_compile, avg_overhead]
+        colors = ['#2ecc71', '#3498db', '#e74c3c']
+        ax1.bar(categories, values, color=colors, edgecolor='black', alpha=0.8)
+        ax1.set_ylabel('Time (seconds)')
+        ax1.set_title('Average Time Breakdown')
+        ax1.grid(True, alpha=0.3, axis='y')
+        for i, v in enumerate(values):
+            pct = v / avg_total * 100
+            ax1.text(i, v + 0.05, f'{v:.2f}s\n({pct:.0f}%)', ha='center', fontsize=9)
+        
+        # 2. SQL execution time distribution
+        ax2 = axes[0, 1]
+        ax2.hist(sql_exec_secs, bins=30, edgecolor='black', alpha=0.7, color='steelblue')
+        ax2.axvline(sql_exec_secs.median(), color='red', linestyle='--', 
+                   label=f'Median: {sql_exec_secs.median():.2f}s')
+        ax2.axvline(sql_exec_secs.mean(), color='green', linestyle='--', 
+                   label=f'Mean: {sql_exec_secs.mean():.2f}s')
+        ax2.set_xlabel('SQL Execution Time (seconds)')
+        ax2.set_ylabel('Frequency')
+        ax2.set_title('SQL Execution Time Distribution')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        
+        # 3. SQL execution vs total latency scatter
+        ax3 = axes[1, 0]
+        ax3.scatter(sql_exec_df['sql_execution_time_ms'] / 1000, 
+                   sql_exec_df['duration_ms'] / 1000, 
+                   alpha=0.5, s=30)
+        # Add diagonal line (if SQL = total)
+        max_val = max(sql_exec_df['duration_ms'].max() / 1000, sql_exec_df['sql_execution_time_ms'].max() / 1000)
+        ax3.plot([0, max_val], [0, max_val], 'r--', alpha=0.5, label='SQL = Total')
+        ax3.set_xlabel('SQL Execution Time (seconds)')
+        ax3.set_ylabel('Total Latency (seconds)')
+        ax3.set_title('SQL Execution vs Total Latency')
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+        
+        # 4. SQL % of total distribution
+        ax4 = axes[1, 1]
+        ax4.hist(sql_exec_df['sql_pct_of_total'], bins=20, edgecolor='black', alpha=0.7, color='purple')
+        ax4.axvline(sql_exec_df['sql_pct_of_total'].median(), color='red', linestyle='--',
+                   label=f'Median: {sql_exec_df["sql_pct_of_total"].median():.1f}%')
+        ax4.set_xlabel('SQL Execution as % of Total Latency')
+        ax4.set_ylabel('Frequency')
+        ax4.set_title('SQL Execution Time as Percentage of Total')
+        ax4.legend()
+        ax4.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        fig.savefig(images_dir / "sql_execution_metrics.png", dpi=150, bbox_inches='tight')
+        print(f"\nSaved: {images_dir / 'sql_execution_metrics.png'}")
+        plt.show()
+        
+        # Key insights
+        print("\n" + "=" * 60)
+        print("KEY INSIGHTS")
+        print("=" * 60)
+        
+        sql_pct_median = sql_exec_df['sql_pct_of_total'].median()
+        if sql_pct_median > 80:
+            print(f"\n✓ SQL execution dominates latency ({sql_pct_median:.1f}% of total)")
+            print("  Optimization focus: Query performance, warehouse sizing")
+        elif sql_pct_median > 50:
+            print(f"\n⚡ Mixed latency sources (SQL: {sql_pct_median:.1f}% of total)")
+            print("  Both SQL optimization and Genie tuning can help")
+        else:
+            print(f"\n⚠️  Overhead dominates latency (SQL only {sql_pct_median:.1f}% of total)")
+            print("  Focus on Genie API, network, or processing optimization")
+        
+        # Check for high variance
+        sql_cv = sql_exec_secs.std() / sql_exec_secs.mean() if sql_exec_secs.mean() > 0 else 0
+        if sql_cv > 1.0:
+            print(f"\n⚠️  High SQL execution time variance (CV: {sql_cv:.2f})")
+            print("  Some queries are significantly slower - investigate outliers")
+        else:
+            print(f"\n✓ SQL execution times are relatively consistent (CV: {sql_cv:.2f})")
+            
+    else:
+        print("No SQL execution metrics available (sql_execution_time_ms column is empty)")
+        print("Ensure the load test is configured to capture metrics from system.query.history")
+else:
+    print("No SQL execution metrics columns found in detailed_metrics.csv")
+    print("These metrics are captured from system.query.history during load tests")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Concurrency Impact Analysis
 # MAGIC
 # MAGIC **What it shows:** How Genie's performance changes as the number of concurrent users increases.

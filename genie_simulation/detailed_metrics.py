@@ -36,6 +36,13 @@ class RequestMetric:
     response_size: int
     success: bool
     error: Optional[str]
+    # SQL execution metrics from system.query.history
+    sql_statement_id: Optional[str] = None  # Statement ID from query history
+    sql_execution_time_ms: Optional[float] = None  # Time spent executing SQL in warehouse
+    sql_compilation_time_ms: Optional[float] = None  # Time spent compiling/planning SQL
+    sql_rows_produced: Optional[int] = None  # Number of rows returned by query
+    sql_bytes_read: Optional[int] = None  # Bytes read during execution
+    sql_bytes_written: Optional[int] = None  # Bytes written during execution
 
 
 class DetailedMetricsCollector:
@@ -124,7 +131,9 @@ class DetailedMetricsCollector:
                     "run_id", "space_id", "request_started_at", "request_completed_at", "duration_ms",
                     "concurrent_users", "user", "prompt", "source_conversation_id",
                     "source_message_id", "genie_conversation_id", "genie_message_id",
-                    "message_index", "sql", "response_size", "success", "error"
+                    "message_index", "sql", "response_size", "success", "error",
+                    "sql_statement_id", "sql_execution_time_ms", "sql_compilation_time_ms",
+                    "sql_rows_produced", "sql_bytes_read", "sql_bytes_written"
                 ])
             return 0
         

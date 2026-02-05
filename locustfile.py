@@ -42,6 +42,7 @@ from genie_simulation.detailed_metrics import (
     RequestMetric,
 )
 from genie_simulation.export_to_uc import export_to_unity_catalog_if_available
+from genie_simulation.query_history import get_query_history_client, SQLExecutionMetrics
 
 # Load environment variables from .env file if present
 load_dotenv()
@@ -266,6 +267,21 @@ class GenieLoadTestUser(User):
             request_completed_at: datetime = datetime.now()
             duration_ms = (time.time() - start_time) * 1000  # Convert to ms
 
+            # Fetch SQL execution metrics from system.query.history
+            sql_metrics: SQLExecutionMetrics | None = None
+            sql_query = response.query if response else None
+            if sql_query and exception is None:
+                try:
+                    query_history_client = get_query_history_client()
+                    if query_history_client:
+                        sql_metrics = query_history_client.get_metrics_for_sql(
+                            sql_text=sql_query,
+                            start_time=request_started_at,
+                            end_time=request_completed_at,
+                        )
+                except Exception as e:
+                    logger.debug(f"Failed to fetch SQL execution metrics: {e}")
+
             # Record detailed metrics
             run_id = os.path.basename(os.environ.get("GENIE_RESULTS_DIR", "unknown_run"))
             space_id = os.environ.get("GENIE_SPACE_ID", "unknown_space")
@@ -283,10 +299,17 @@ class GenieLoadTestUser(User):
                 genie_conversation_id=response.conversation_id if response else active_conversation_id,
                 genie_message_id=response.message_id if response else None,
                 message_index=i,
-                sql=response.query if response else None,
+                sql=sql_query,
                 response_size=response_length,
                 success=exception is None,
                 error=str(exception) if exception else None,
+                # SQL execution metrics from system.query.history
+                sql_statement_id=sql_metrics.statement_id if sql_metrics else None,
+                sql_execution_time_ms=sql_metrics.execution_time_ms if sql_metrics else None,
+                sql_compilation_time_ms=sql_metrics.compilation_time_ms if sql_metrics else None,
+                sql_rows_produced=sql_metrics.rows_produced if sql_metrics else None,
+                sql_bytes_read=sql_metrics.bytes_read if sql_metrics else None,
+                sql_bytes_written=sql_metrics.bytes_written if sql_metrics else None,
             ))
 
             # Fire the request event for Locust to track
