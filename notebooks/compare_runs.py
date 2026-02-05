@@ -74,7 +74,8 @@ for i, d in enumerate(available_dirs[:20]):
 # COMMAND ----------
 
 # Widget for selecting multiple results directories (comma-separated)
-default_dirs = ", ".join(available_dirs[:3]) if len(available_dirs) >= 3 else ", ".join(available_dirs)
+# Default to all available directories
+default_dirs = ", ".join(available_dirs)
 
 dbutils.widgets.text("results_dirs", default_dirs, "Results Directories (comma-separated, results/ prefix optional)")
 dbutils.widgets.text("space_id_filter", "", "Filter by Space ID (leave blank for all)")
