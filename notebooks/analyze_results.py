@@ -867,6 +867,8 @@ else:
 
 # COMMAND ----------
 
+import numpy as np
+
 if not detailed_metrics_df.empty and 'sql' in detailed_metrics_df.columns:
     print("=" * 70)
     print("SQL COMPLEXITY ANALYSIS")
@@ -1149,6 +1151,22 @@ else:
 # MAGIC - Justify infrastructure scaling decisions with data
 # MAGIC - Set capacity alerts and auto-scaling thresholds
 # MAGIC - Calculate the cost per user at different concurrency levels
+# MAGIC
+# MAGIC ### Visualizations (2 figures, 10 plots total)
+# MAGIC
+# MAGIC **Figure 1 - Core Metrics:**
+# MAGIC 1. **Latency Percentiles Line Chart**: P50/P90/P95/P99 vs concurrent users
+# MAGIC 2. **Box Plot by Concurrency**: Distribution spread at each level
+# MAGIC 3. **Success Rate vs Users**: Reliability under load
+# MAGIC 4. **Degradation Factor**: Normalized performance vs baseline
+# MAGIC
+# MAGIC **Figure 2 - Extended Analysis:**
+# MAGIC 1. **Violin Plot**: Full distribution shape showing bimodal patterns (cache hits vs misses)
+# MAGIC 2. **Latency CDF**: Cumulative distribution for SLA analysis (% requests under X seconds)
+# MAGIC 3. **Heatmap**: 2D density showing where responses cluster at each concurrency level
+# MAGIC 4. **Throughput Efficiency**: Requests per user - reveals diminishing returns
+# MAGIC 5. **Tail Latency Amplification**: P99/P50 ratio - shows if worst-case grows faster than typical
+# MAGIC 6. **Latency Scatter**: Individual requests colored by concurrency level
 
 # COMMAND ----------
 
@@ -1247,6 +1265,128 @@ if not detailed_metrics_df.empty and 'concurrent_users' in detailed_metrics_df.c
     fig.savefig(images_dir / "concurrency_impact_analysis.png", dpi=150, bbox_inches='tight')
     print(f"\nSaved: {images_dir / 'concurrency_impact_analysis.png'}")
     plt.show()
+
+    # Extended Concurrency Visualizations
+    print("\n" + "=" * 60)
+    print("EXTENDED CONCURRENCY ANALYSIS")
+    print("=" * 60)
+
+    fig2, axes2 = plt.subplots(2, 3, figsize=(18, 10))
+
+    # 1. Violin Plot - Full distribution shape at each concurrency level
+    ax_violin = axes2[0, 0]
+    violin_data = [detailed_metrics_df[detailed_metrics_df['concurrent_users'] == level]['duration_ms'] / 1000
+                   for level in concurrent_user_levels]
+    parts = ax_violin.violinplot(violin_data, positions=range(len(concurrent_user_levels)), showmedians=True, showextrema=True)
+    ax_violin.set_xticks(range(len(concurrent_user_levels)))
+    ax_violin.set_xticklabels(concurrent_user_levels)
+    ax_violin.set_xlabel('Concurrent Users')
+    ax_violin.set_ylabel('Response Time (seconds)')
+    ax_violin.set_title('Latency Distribution (Violin Plot)')
+    ax_violin.grid(True, alpha=0.3, axis='y')
+
+    # 2. Latency CDF - Cumulative Distribution Function per concurrency level
+    ax_cdf = axes2[0, 1]
+    for level in concurrent_user_levels:
+        level_data = detailed_metrics_df[detailed_metrics_df['concurrent_users'] == level]['duration_ms'] / 1000
+        sorted_latencies = np.sort(level_data)
+        cdf = np.arange(1, len(sorted_latencies) + 1) / len(sorted_latencies)
+        ax_cdf.plot(sorted_latencies, cdf * 100, label=f'{level} users', linewidth=2, alpha=0.8)
+    ax_cdf.set_xlabel('Response Time (seconds)')
+    ax_cdf.set_ylabel('Cumulative % of Requests')
+    ax_cdf.set_title('Latency CDF by Concurrency Level')
+    ax_cdf.legend(loc='lower right')
+    ax_cdf.grid(True, alpha=0.3)
+    ax_cdf.axhline(50, color='gray', linestyle='--', alpha=0.5)
+    ax_cdf.axhline(95, color='orange', linestyle='--', alpha=0.5)
+    ax_cdf.axhline(99, color='red', linestyle='--', alpha=0.5)
+
+    # 3. Heatmap of Latency Distribution
+    ax_heatmap = axes2[0, 2]
+    max_latency = detailed_metrics_df['duration_ms'].max() / 1000
+    latency_bins = np.linspace(0, min(max_latency, detailed_metrics_df['duration_ms'].quantile(0.99) / 1000), 20)
+    heatmap_data = []
+    for level in concurrent_user_levels:
+        level_data = detailed_metrics_df[detailed_metrics_df['concurrent_users'] == level]['duration_ms'] / 1000
+        hist, _ = np.histogram(level_data, bins=latency_bins, density=True)
+        heatmap_data.append(hist)
+    heatmap_array = np.array(heatmap_data).T
+    im = ax_heatmap.imshow(heatmap_array, aspect='auto', cmap='YlOrRd', origin='lower',
+                           extent=[0, len(concurrent_user_levels), latency_bins[0], latency_bins[-1]])
+    ax_heatmap.set_xticks(np.arange(len(concurrent_user_levels)) + 0.5)
+    ax_heatmap.set_xticklabels(concurrent_user_levels)
+    ax_heatmap.set_xlabel('Concurrent Users')
+    ax_heatmap.set_ylabel('Response Time (seconds)')
+    ax_heatmap.set_title('Latency Density Heatmap')
+    plt.colorbar(im, ax=ax_heatmap, label='Density')
+
+    # 4. Throughput Efficiency Curve (requests per user)
+    ax_efficiency = axes2[1, 0]
+    efficiency = concurrency_stats['count'] / concurrency_stats.index
+    ax_efficiency.plot(concurrency_stats.index, efficiency, marker='o', linewidth=2, markersize=8, color='teal')
+    ax_efficiency.set_xlabel('Concurrent Users')
+    ax_efficiency.set_ylabel('Requests per User')
+    ax_efficiency.set_title('Throughput Efficiency (Requests/User)')
+    ax_efficiency.grid(True, alpha=0.3)
+    if len(efficiency) > 1:
+        baseline_efficiency = efficiency.iloc[0]
+        for i, (users, eff) in enumerate(zip(concurrency_stats.index, efficiency)):
+            pct = (eff / baseline_efficiency) * 100
+            ax_efficiency.annotate(f'{pct:.0f}%', (users, eff), textcoords="offset points",
+                                  xytext=(0, 10), ha='center', fontsize=8)
+
+    # 5. Tail Latency Amplification (P99/P50 ratio)
+    ax_tail = axes2[1, 1]
+    tail_ratio = concurrency_stats['p99_s'] / concurrency_stats['median_s']
+    ax_tail.plot(concurrency_stats.index, tail_ratio, marker='s', linewidth=2, markersize=8, color='darkred')
+    ax_tail.axhline(2.0, color='orange', linestyle='--', alpha=0.5, label='2x threshold')
+    ax_tail.axhline(3.0, color='red', linestyle='--', alpha=0.5, label='3x threshold')
+    ax_tail.set_xlabel('Concurrent Users')
+    ax_tail.set_ylabel('P99/P50 Ratio')
+    ax_tail.set_title('Tail Latency Amplification')
+    ax_tail.legend()
+    ax_tail.grid(True, alpha=0.3)
+
+    # 6. Latency Scatter by Concurrency (colored by user count)
+    ax_scatter = axes2[1, 2]
+    scatter = ax_scatter.scatter(
+        detailed_metrics_df['concurrent_users'],
+        detailed_metrics_df['duration_ms'] / 1000,
+        c=detailed_metrics_df['concurrent_users'],
+        cmap='viridis',
+        alpha=0.5,
+        s=20
+    )
+    ax_scatter.set_xlabel('Concurrent Users')
+    ax_scatter.set_ylabel('Response Time (seconds)')
+    ax_scatter.set_title('Individual Request Latencies')
+    ax_scatter.grid(True, alpha=0.3)
+    plt.colorbar(scatter, ax=ax_scatter, label='Concurrent Users')
+
+    plt.tight_layout()
+    fig2.savefig(images_dir / "concurrency_impact_extended.png", dpi=150, bbox_inches='tight')
+    print(f"Saved: {images_dir / 'concurrency_impact_extended.png'}")
+    plt.show()
+
+    # Extended insights
+    print("\nExtended Concurrency Insights:")
+    if len(concurrency_stats) > 1:
+        min_tail_ratio = tail_ratio.min()
+        max_tail_ratio = tail_ratio.max()
+        print(f"  Tail Latency Ratio (P99/P50): {min_tail_ratio:.2f}x → {max_tail_ratio:.2f}x")
+        if max_tail_ratio > 3:
+            print("    ⚠️  High tail latency amplification - investigate outliers")
+        elif max_tail_ratio > 2:
+            print("    ⚡ Moderate tail latency - some requests are significantly slower")
+        else:
+            print("    ✓ Tail latencies are well-controlled")
+
+        efficiency_drop = ((efficiency.iloc[-1] / efficiency.iloc[0]) - 1) * 100
+        print(f"  Throughput Efficiency Change: {efficiency_drop:+.1f}%")
+        if efficiency_drop < -30:
+            print("    ⚠️  Significant efficiency loss with more users")
+        else:
+            print("    ✓ Efficiency remains reasonable under load")
 
     # Key insights
     print("\n" + "=" * 60)
