@@ -1,4 +1,4 @@
-dao-ai>=0.1.20
+dao-ai>=0.1.22
 databricks-ai-bridge>=0.6.0
 databricks-sdk>=0.81.0
 locust>=2.29.0
