@@ -42,9 +42,6 @@ class SQLExecutionMetrics:
         - rows_read: Rows scanned from storage (read_rows)
         - execution_status: Query status (execution_status)
         - error_message: Error details if failed (error_message)
-        - warehouse_id: Which warehouse ran query (compute.warehouse_id)
-        - genie_space_id: Genie space that originated query (query_source.genie_space_id)
-        - genie_conversation_id: Conversation ID (query_source.genie_conversation_id)
     """
     
     statement_id: str
@@ -61,9 +58,6 @@ class SQLExecutionMetrics:
     execution_status: str
     rows_read: int = 0
     error_message: Optional[str] = None
-    warehouse_id: Optional[str] = None
-    genie_space_id: Optional[str] = None
-    genie_conversation_id: Optional[str] = None
 
 
 class QueryHistoryClient:
@@ -133,10 +127,7 @@ class QueryHistoryClient:
             start_time,
             end_time,
             execution_status,
-            error_message,
-            compute.warehouse_id as warehouse_id,
-            query_source.genie_space_id as genie_space_id,
-            query_source.genie_conversation_id as genie_conversation_id
+            error_message
         FROM {self.query_history_table}
         WHERE statement_id = '{escaped_id}'
         LIMIT 1
@@ -167,15 +158,20 @@ class QueryHistoryClient:
                         end_time=datetime.fromisoformat(str(row[11])) if row[11] else datetime.now(),
                         execution_status=str(row[12]) if row[12] else "UNKNOWN",
                         error_message=str(row[13]) if row[13] else None,
-                        warehouse_id=str(row[14]) if row[14] else None,
-                        genie_space_id=str(row[15]) if row[15] else None,
-                        genie_conversation_id=str(row[16]) if row[16] else None,
                     )
                     
                     with self._lock:
                         self._cache[statement_id] = metrics
                     
                     return metrics
+            elif response.status:
+                error_msg = (
+                    response.status.error.message
+                    if response.status.error
+                    else f"state={response.status.state}"
+                )
+                import logging
+                logging.warning(f"Query history lookup failed: {error_msg}")
                     
         except Exception as e:
             import logging

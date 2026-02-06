@@ -90,27 +90,23 @@ default_dir = available_dirs[0] if available_dirs else ""
 
 dbutils.widgets.text("results_dir", default_dir, "Results Directory")
 
-# Widget for SQL warehouse ID (used for enrichment with query.history and access.audit)
+# Widget for SQL warehouse ID (used for enrichment with query.history)
 default_warehouse_id = os.environ.get("GENIE_WAREHOUSE_ID", "")
 dbutils.widgets.text("warehouse_id", default_warehouse_id, "SQL Warehouse ID (for enrichment)")
 
-# Widgets for system table paths (fully-qualified: catalog.schema.table)
+# Widget for system table path (fully-qualified: catalog.schema.table)
 # Override when system tables are exposed via views in a different catalog/schema
 default_query_history_table = os.environ.get("SYSTEM_QUERY_HISTORY_TABLE", "system.query.history")
-default_access_audit_table = os.environ.get("SYSTEM_ACCESS_AUDIT_TABLE", "system.access.audit")
 dbutils.widgets.text("query_history_table", default_query_history_table, "Query History Table")
-dbutils.widgets.text("access_audit_table", default_access_audit_table, "Access Audit Table")
 
 # COMMAND ----------
 
 results_dir = dbutils.widgets.get("results_dir")
 warehouse_id = dbutils.widgets.get("warehouse_id").strip() or os.environ.get("GENIE_WAREHOUSE_ID", "")
 query_history_table = dbutils.widgets.get("query_history_table").strip() or os.environ.get("SYSTEM_QUERY_HISTORY_TABLE", "system.query.history")
-access_audit_table = dbutils.widgets.get("access_audit_table").strip() or os.environ.get("SYSTEM_ACCESS_AUDIT_TABLE", "system.access.audit")
 print(f"Analyzing results from: {results_dir}")
 print(f"SQL Warehouse ID: {warehouse_id if warehouse_id else '(not set - needed for SQL metrics enrichment)'}")
 print(f"Query History Table: {query_history_table}")
-print(f"Access Audit Table: {access_audit_table}")
 
 # COMMAND ----------
 
@@ -1300,7 +1296,6 @@ if enrichment_needed and warehouse_id:
             metrics_csv_path=str(metrics_path),
             warehouse_id=warehouse_id,
             query_history_table=query_history_table,
-            access_audit_table=access_audit_table,
         )
         
         # Reload the dataframe
@@ -1422,7 +1417,7 @@ if not detailed_metrics_df.empty and has_sql_metrics:
         
         # 1. Time breakdown stacked bar - show all components
         ax1 = axes[0, 0]
-        categories = ['Execution', 'Compilation', 'Queue Wait', 'Compute Wait', 'Result Fetch', 'AI Overhead']
+        categories = ['Execution', 'Compilation', 'Queue Wait', 'Compute Wait', 'Result Fetch', 'Overhead']
         values = [avg_sql_exec, avg_compile, avg_queue_wait, avg_compute_wait, avg_result_fetch, avg_overhead]
         colors = ['#2ecc71', '#3498db', '#f39c12', '#9b59b6', '#1abc9c', '#e74c3c']
         ax1.bar(categories, values, color=colors, edgecolor='black', alpha=0.8)
@@ -1530,101 +1525,6 @@ if not detailed_metrics_df.empty and has_sql_metrics:
 else:
     print("No SQL execution metrics columns found in detailed_metrics.csv")
     print(f"These metrics are populated by post-processing enrichment from {query_history_table}")
-
-# COMMAND ----------
-
-# MAGIC %md
-# MAGIC ## AI Overhead Analysis (from system.access.audit)
-# MAGIC
-# MAGIC **What it shows:** The time Genie spends on AI inference (NL-to-SQL generation) before
-# MAGIC executing the first SQL query. This is calculated by correlating:
-# MAGIC - `system.access.audit`: When the Genie API received the user message
-# MAGIC - `system.query.history`: When the first SQL query started executing
-# MAGIC
-# MAGIC **AI Overhead = First Query Start - Message Event Time**
-# MAGIC
-# MAGIC **Why it matters:** This separates "thinking time" from "execution time":
-# MAGIC - **High AI overhead**: Genie is slow at generating SQL - may need prompt optimization
-# MAGIC - **Low AI overhead**: Genie generates SQL quickly - focus optimization on warehouse
-
-# COMMAND ----------
-
-if not detailed_metrics_df.empty and 'ai_overhead_ms' in detailed_metrics_df.columns:
-    ai_df = detailed_metrics_df[detailed_metrics_df['ai_overhead_ms'].notna()].copy()
-    
-    if len(ai_df) > 0:
-        print("=" * 70)
-        print(f"AI OVERHEAD ANALYSIS (from {access_audit_table})")
-        print("=" * 70)
-        
-        ai_secs = ai_df['ai_overhead_ms'] / 1000
-        
-        print(f"\n{'Metric':<40} {'Value':>20}")
-        print("-" * 60)
-        print(f"{'Requests with AI overhead data':<40} {len(ai_df):>20}")
-        print(f"{'Coverage':<40} {f'{len(ai_df)/len(detailed_metrics_df)*100:.1f}%':>20}")
-        
-        print(f"\n{'AI OVERHEAD (seconds)':<40}")
-        print("-" * 60)
-        print(f"{'  Mean':<40} {ai_secs.mean():>19.2f}s")
-        print(f"{'  Median':<40} {ai_secs.median():>19.2f}s")
-        print(f"{'  P90':<40} {ai_secs.quantile(0.90):>19.2f}s")
-        print(f"{'  P95':<40} {ai_secs.quantile(0.95):>19.2f}s")
-        print(f"{'  P99':<40} {ai_secs.quantile(0.99):>19.2f}s")
-        
-        # Compare with SQL execution time
-        if 'sql_total_duration_ms' in ai_df.columns:
-            sql_total = ai_df['sql_total_duration_ms'] / 1000
-            total = ai_df['duration_ms'] / 1000
-            
-            avg_ai = ai_secs.mean()
-            avg_sql = sql_total.mean()
-            avg_total = total.mean()
-            avg_other = avg_total - avg_ai - avg_sql
-            
-            print(f"\n{'FULL TIME BREAKDOWN (seconds)':<40}")
-            print("-" * 60)
-            print(f"{'  AI Overhead (NL-to-SQL)':<40} {avg_ai:>19.2f}s ({avg_ai/avg_total*100:.1f}%)")
-            print(f"{'  SQL Execution (warehouse)':<40} {avg_sql:>19.2f}s ({avg_sql/avg_total*100:.1f}%)")
-            print(f"{'  Other (network, etc.)':<40} {max(0, avg_other):>19.2f}s ({max(0, avg_other)/avg_total*100:.1f}%)")
-            print(f"{'  Total (end-to-end)':<40} {avg_total:>19.2f}s")
-        
-        # Visualization
-        fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-        
-        ax1 = axes[0]
-        ax1.hist(ai_secs, bins=30, edgecolor='black', alpha=0.7, color='coral')
-        ax1.axvline(ai_secs.median(), color='red', linestyle='--',
-                   label=f'Median: {ai_secs.median():.2f}s')
-        ax1.set_xlabel('AI Overhead (seconds)')
-        ax1.set_ylabel('Frequency')
-        ax1.set_title('AI Overhead Distribution')
-        ax1.legend()
-        ax1.grid(True, alpha=0.3)
-        
-        # Stacked breakdown if we have all components
-        ax2 = axes[1]
-        if 'sql_total_duration_ms' in ai_df.columns:
-            categories = ['AI Overhead', 'SQL Warehouse', 'Other']
-            values_breakdown = [avg_ai, avg_sql, max(0, avg_other)]
-            colors_breakdown = ['#e74c3c', '#2ecc71', '#95a5a6']
-            ax2.bar(categories, values_breakdown, color=colors_breakdown, edgecolor='black', alpha=0.8)
-            ax2.set_ylabel('Time (seconds)')
-            ax2.set_title('Average End-to-End Breakdown')
-            ax2.grid(True, alpha=0.3, axis='y')
-            for i, v in enumerate(values_breakdown):
-                if v > 0.01:
-                    ax2.text(i, v + 0.02, f'{v:.2f}s', ha='center', fontsize=9)
-        
-        plt.tight_layout()
-        fig.savefig(images_dir / "ai_overhead_analysis.png", dpi=150, bbox_inches='tight')
-        print(f"\nSaved: {images_dir / 'ai_overhead_analysis.png'}")
-        plt.show()
-    else:
-        print("No AI overhead data available")
-        print(f"AI overhead requires {access_audit_table} data (enrichment with warehouse_id)")
-else:
-    print(f"No AI overhead data in metrics - this is computed from {access_audit_table} during enrichment")
 
 # COMMAND ----------
 

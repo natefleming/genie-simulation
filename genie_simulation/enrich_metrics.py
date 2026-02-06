@@ -3,8 +3,7 @@ Enrich detailed metrics with SQL execution data from system tables.
 
 This module provides post-processing functionality to add:
 1. SQL execution metrics from query history (looked up by statement_id)
-2. AI overhead from audit table (time from message to first SQL query)
-3. Bottleneck classification and speed categorization
+2. Bottleneck classification and speed categorization
 
 The statement_id is captured at runtime from GenieResponse.statement_id,
 enabling deterministic matching against system.query.history without
@@ -15,7 +14,6 @@ with the data, which typically takes 15-30 minutes after the queries execute.
 
 System table paths are configurable via environment variables:
 - SYSTEM_QUERY_HISTORY_TABLE (default: system.query.history)
-- SYSTEM_ACCESS_AUDIT_TABLE (default: system.access.audit)
 
 Usage:
     from genie_simulation.enrich_metrics import enrich_metrics_with_query_history
@@ -28,7 +26,6 @@ Usage:
 """
 
 import os
-from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -36,19 +33,13 @@ import pandas as pd
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.sql import StatementState
 
-# Default fully-qualified table paths (standard Databricks system table locations)
+# Default fully-qualified table path (standard Databricks system table location)
 DEFAULT_QUERY_HISTORY_TABLE = "system.query.history"
-DEFAULT_ACCESS_AUDIT_TABLE = "system.access.audit"
 
 
 def _get_query_history_table() -> str:
     """Get the fully-qualified query history table path from env or default."""
     return os.environ.get("SYSTEM_QUERY_HISTORY_TABLE", DEFAULT_QUERY_HISTORY_TABLE)
-
-
-def _get_access_audit_table() -> str:
-    """Get the fully-qualified access audit table path from env or default."""
-    return os.environ.get("SYSTEM_ACCESS_AUDIT_TABLE", DEFAULT_ACCESS_AUDIT_TABLE)
 
 
 def classify_bottleneck(row: pd.Series) -> str:
@@ -129,7 +120,6 @@ _HISTORY_TO_METRICS_COLUMNS: dict[str, str] = {
     "bytes_read": "sql_bytes_read",
     "rows_read": "sql_rows_read",
     "error_message": "sql_error_message",
-    "warehouse_id": "sql_warehouse_id",
 }
 
 
@@ -191,10 +181,7 @@ def get_query_history_by_statement_ids(
             COALESCE(read_bytes, 0) as bytes_read,
             COALESCE(read_rows, 0) as rows_read,
             execution_status,
-            error_message,
-            compute.warehouse_id as warehouse_id,
-            query_source.genie_space_id as genie_space_id,
-            query_source.genie_conversation_id as genie_conversation_id
+            error_message
         FROM {query_history_table}
         WHERE statement_id IN ({id_list})
         ORDER BY start_time
@@ -214,11 +201,17 @@ def get_query_history_by_statement_ids(
                         "total_duration_ms", "execution_duration_ms", "compilation_duration_ms",
                         "queue_wait_ms", "compute_wait_ms", "result_fetch_ms",
                         "rows_produced", "bytes_read", "rows_read",
-                        "execution_status", "error_message", "warehouse_id",
-                        "genie_space_id", "genie_conversation_id",
+                        "execution_status", "error_message",
                     ]
                     batch_df = pd.DataFrame(response.result.data_array, columns=columns)
                     all_results.append(batch_df)
+            elif response.status:
+                error_msg = (
+                    response.status.error.message
+                    if response.status.error
+                    else f"state={response.status.state}"
+                )
+                print(f"  Query failed (batch {i // batch_size}): {error_msg}")
                     
         except Exception as e:
             print(f"Error fetching query history by statement_ids (batch {i // batch_size}): {e}")
@@ -243,110 +236,19 @@ def get_query_history_by_statement_ids(
     return df
 
 
-def get_audit_events_for_timerange(
-    warehouse_id: str,
-    start_time: datetime,
-    end_time: datetime,
-    space_id: str,
-    access_audit_table: Optional[str] = None,
-    client: Optional[WorkspaceClient] = None,
-) -> pd.DataFrame:
-    """
-    Fetch Genie audit events from audit table for AI overhead calculation.
-    
-    The audit log captures when Genie API received a message. By comparing this
-    with the query start_time from query history, we can calculate the
-    AI overhead (NL-to-SQL inference time).
-    
-    Args:
-        warehouse_id: SQL warehouse ID to use for querying.
-        start_time: Start of the time range.
-        end_time: End of the time range.
-        space_id: Genie space ID to filter events.
-        access_audit_table: Fully-qualified table path (default: from env or system.access.audit).
-        client: Optional WorkspaceClient instance.
-        
-    Returns:
-        DataFrame with audit event entries.
-    """
-    if client is None:
-        client = WorkspaceClient()
-    
-    if access_audit_table is None:
-        access_audit_table = _get_access_audit_table()
-    
-    # Format timestamps for date filter (audit uses event_date for partition pruning)
-    start_date = start_time.strftime("%Y-%m-%d")
-    end_date = (end_time + timedelta(days=1)).strftime("%Y-%m-%d")
-    start_ts = start_time.strftime("%Y-%m-%d %H:%M:%S")
-    end_ts = end_time.strftime("%Y-%m-%d %H:%M:%S")
-    
-    # Query audit table for Genie message events
-    # These events record when the Genie API received a user message
-    query = f"""
-    SELECT
-        event_time as message_time,
-        request_params.conversation_id as conversation_id,
-        request_params.message_id as message_id,
-        user_identity.email as user_email,
-        action_name
-    FROM {access_audit_table}
-    WHERE service_name = 'aibiGenie'
-      AND event_date >= '{start_date}'
-      AND event_date <= '{end_date}'
-      AND event_time >= '{start_ts}'
-      AND event_time <= '{end_ts}'
-      AND action_name IN (
-          'genieStartConversationMessage',
-          'genieContinueConversationMessage',
-          'genieCreateConversationMessage',
-          'createConversationMessage',
-          'regenerateConversationMessage'
-      )
-      AND request_params.space_id = '{space_id}'
-    ORDER BY event_time
-    """
-    
-    try:
-        response = client.statement_execution.execute_statement(
-            warehouse_id=warehouse_id,
-            statement=query,
-            wait_timeout="50s",
-        )
-        
-        if response.status and response.status.state == StatementState.SUCCEEDED:
-            if response.result and response.result.data_array:
-                columns = [
-                    "message_time", "conversation_id", "message_id",
-                    "user_email", "action_name",
-                ]
-                df = pd.DataFrame(response.result.data_array, columns=columns)
-                df["message_time"] = pd.to_datetime(df["message_time"])
-                return df
-                
-        return pd.DataFrame()
-        
-    except Exception as e:
-        print(f"Error fetching audit events: {e}")
-        return pd.DataFrame()
-
-
 def enrich_with_query_history(
     metrics_df: pd.DataFrame,
     history_df: pd.DataFrame,
-    audit_df: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """
     Enrich metrics with query history data using a merge on statement_id.
     
     Joins metrics rows to query history by sql_statement_id, then applies
-    bottleneck classification and speed categorization. Optionally computes
-    AI overhead from audit events.
+    bottleneck classification and speed categorization.
     
     Args:
         metrics_df: DataFrame with detailed metrics (must have sql_statement_id column).
         history_df: DataFrame with query history (from get_query_history_by_statement_ids).
-        audit_df: Optional DataFrame with audit events for AI overhead.
         
     Returns:
         Metrics DataFrame with SQL execution columns populated.
@@ -383,10 +285,6 @@ def enrich_with_query_history(
     matched_count = enriched_df["sql_total_duration_ms"].notna().sum()
     print(f"Matched {matched_count} of {len(enriched_df)} requests by statement_id")
     
-    # Compute AI overhead from audit events if available
-    if audit_df is not None and not audit_df.empty:
-        _compute_ai_overhead(enriched_df, history_df, audit_df)
-    
     # Add bottleneck classification and speed category for matched rows
     enriched_mask = enriched_df["sql_total_duration_ms"].notna()
     if enriched_mask.any():
@@ -400,95 +298,14 @@ def enrich_with_query_history(
     return enriched_df
 
 
-def _compute_ai_overhead(
-    metrics_df: pd.DataFrame,
-    history_df: pd.DataFrame,
-    audit_df: pd.DataFrame,
-) -> None:
-    """
-    Compute AI overhead by correlating audit events with query history.
-    
-    AI overhead = time from message event (audit) to first query start (query history).
-    This represents NL-to-SQL inference time.
-    
-    Modifies metrics_df in place.
-    
-    Args:
-        metrics_df: DataFrame with detailed metrics (modified in place).
-        history_df: DataFrame with query history.
-        audit_df: DataFrame with audit events.
-    """
-    if audit_df.empty or history_df.empty:
-        return
-    
-    if "genie_conversation_id" not in history_df.columns:
-        return
-    
-    # Ensure timestamps are parsed
-    metrics_df["request_started_at"] = pd.to_datetime(metrics_df["request_started_at"])
-    history_df["start_time"] = pd.to_datetime(history_df["start_time"])
-    
-    overhead_count = 0
-    
-    for idx, row in metrics_df.iterrows():
-        conv_id = row.get("genie_conversation_id")
-        if pd.isna(conv_id) or not conv_id:
-            continue
-        
-        # Find matching audit event for this conversation
-        audit_matches = audit_df[audit_df["conversation_id"] == conv_id]
-        if audit_matches.empty:
-            continue
-        
-        # Find the audit event closest to (but before) the request start time
-        request_time = row["request_started_at"]
-        audit_before = audit_matches[audit_matches["message_time"] <= request_time]
-        
-        if audit_before.empty:
-            # Try using the closest audit event within tolerance
-            time_diffs = abs((audit_matches["message_time"] - request_time).dt.total_seconds())
-            close_events = audit_matches[time_diffs <= 60]
-            if close_events.empty:
-                continue
-            best_audit = close_events.loc[time_diffs[close_events.index].idxmin()]
-        else:
-            # Take the most recent audit event before the request
-            best_audit = audit_before.loc[audit_before["message_time"].idxmax()]
-        
-        message_time = best_audit["message_time"]
-        
-        # Find the first query for this conversation after the message
-        conv_queries = history_df[
-            (history_df["genie_conversation_id"] == conv_id)
-            & (history_df["start_time"] >= message_time)
-        ]
-        
-        if conv_queries.empty:
-            continue
-        
-        first_query_time = conv_queries["start_time"].min()
-        
-        # AI overhead = time from message to first query start
-        ai_overhead_ms = (first_query_time - message_time).total_seconds() * 1000
-        
-        # Sanity check: AI overhead should be positive and reasonable (< 5 minutes)
-        if 0 <= ai_overhead_ms <= 300_000:
-            metrics_df.at[idx, "ai_overhead_ms"] = ai_overhead_ms
-            overhead_count += 1
-    
-    print(f"  Computed AI overhead for {overhead_count} requests")
-
-
 def enrich_metrics_with_query_history(
     metrics_csv_path: str,
     warehouse_id: Optional[str] = None,
     query_history_table: Optional[str] = None,
-    access_audit_table: Optional[str] = None,
     output_path: Optional[str] = None,
-    time_buffer_minutes: int = 30,
 ) -> pd.DataFrame:
     """
-    Enrich detailed_metrics.csv with SQL execution metrics and AI overhead.
+    Enrich detailed_metrics.csv with SQL execution metrics.
     
     Looks up query history by statement_id (captured at runtime from GenieResponse),
     then adds bottleneck classification and speed categorization.
@@ -501,10 +318,7 @@ def enrich_metrics_with_query_history(
         warehouse_id: SQL warehouse ID (default: from GENIE_WAREHOUSE_ID env var).
         query_history_table: Fully-qualified query history table path
             (default: from SYSTEM_QUERY_HISTORY_TABLE env var or system.query.history).
-        access_audit_table: Fully-qualified access audit table path
-            (default: from SYSTEM_ACCESS_AUDIT_TABLE env var or system.access.audit).
         output_path: Optional output path (default: overwrites input file).
-        time_buffer_minutes: Extra time buffer around test window for audit events (default: 30).
         
     Returns:
         Enriched DataFrame with SQL execution metrics.
@@ -517,8 +331,6 @@ def enrich_metrics_with_query_history(
     
     if query_history_table is None:
         query_history_table = _get_query_history_table()
-    if access_audit_table is None:
-        access_audit_table = _get_access_audit_table()
     
     if output_path is None:
         output_path = metrics_csv_path
@@ -562,36 +374,9 @@ def enrich_metrics_with_query_history(
         print("  System tables typically have 15-30 minute ingestion delay.")
         return metrics_df
     
-    # Get time range for audit event lookup
-    metrics_df["request_started_at"] = pd.to_datetime(metrics_df["request_started_at"])
-    metrics_df["request_completed_at"] = pd.to_datetime(metrics_df["request_completed_at"])
-    
-    start_time = metrics_df["request_started_at"].min() - timedelta(minutes=time_buffer_minutes)
-    end_time = metrics_df["request_completed_at"].max() + timedelta(minutes=time_buffer_minutes)
-    
-    # Fetch audit events for AI overhead
-    audit_df = pd.DataFrame()
-    space_id = metrics_df["space_id"].iloc[0] if "space_id" in metrics_df.columns else None
-    if space_id:
-        print(f"Fetching audit events from {access_audit_table}...")
-        try:
-            audit_df = get_audit_events_for_timerange(
-                warehouse_id=warehouse_id,
-                start_time=start_time,
-                end_time=end_time,
-                space_id=space_id,
-                access_audit_table=access_audit_table,
-            )
-            print(f"  Found {len(audit_df)} audit events")
-        except Exception as e:
-            print(f"  Warning: Could not fetch audit events: {e}")
-            print("  AI overhead will not be calculated.")
-    else:
-        print("  No space_id found in metrics -- skipping audit event lookup")
-    
     # Enrich via merge on statement_id
     print("Enriching metrics...")
-    enriched_df = enrich_with_query_history(metrics_df, history_df, audit_df=audit_df)
+    enriched_df = enrich_with_query_history(metrics_df, history_df)
     
     # Save
     print(f"Saving enriched metrics to: {output_path}")
@@ -612,14 +397,7 @@ def enrich_metrics_with_query_history(
         print(f"    sql_total_duration_ms, sql_execution_time_ms, sql_compilation_time_ms")
         print(f"    sql_queue_wait_ms, sql_compute_wait_ms, sql_result_fetch_ms")
         print(f"    sql_rows_produced, sql_bytes_read, sql_rows_read")
-        print(f"    sql_error_message, sql_warehouse_id")
-        
-        if "ai_overhead_ms" in enriched_df.columns:
-            overhead_count = enriched_df["ai_overhead_ms"].notna().sum()
-            if overhead_count > 0:
-                avg_overhead = enriched_df["ai_overhead_ms"].mean()
-                print(f"  {access_audit_table} -> AI overhead:")
-                print(f"    ai_overhead_ms: {overhead_count} rows, avg {avg_overhead:.0f}ms")
+        print(f"    sql_error_message")
         
         if "sql_bottleneck" in enriched_df.columns:
             bottleneck_counts = enriched_df["sql_bottleneck"].value_counts()
@@ -635,7 +413,6 @@ def enrich_results_directory(
     results_dir: str,
     warehouse_id: Optional[str] = None,
     query_history_table: Optional[str] = None,
-    access_audit_table: Optional[str] = None,
 ) -> Optional[pd.DataFrame]:
     """
     Enrich the detailed_metrics.csv file in a results directory.
@@ -646,7 +423,6 @@ def enrich_results_directory(
         results_dir: Path to the results directory.
         warehouse_id: SQL warehouse ID (optional, uses env var).
         query_history_table: Fully-qualified query history table path (optional, uses env var).
-        access_audit_table: Fully-qualified access audit table path (optional, uses env var).
         
     Returns:
         Enriched DataFrame, or None if file not found.
@@ -661,5 +437,4 @@ def enrich_results_directory(
         metrics_csv_path=str(metrics_path),
         warehouse_id=warehouse_id,
         query_history_table=query_history_table,
-        access_audit_table=access_audit_table,
     )
