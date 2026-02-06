@@ -86,7 +86,7 @@ class QueryHistoryClient:
     def __init__(
         self, 
         warehouse_id: str,
-        system_catalog: str = "system",
+        query_history_table: str = "system.query.history",
         lookback_minutes: int = 30,
     ) -> None:
         """
@@ -94,11 +94,12 @@ class QueryHistoryClient:
         
         Args:
             warehouse_id: The SQL warehouse ID to use for querying system tables.
-            system_catalog: The catalog containing system tables (default: "system").
+            query_history_table: Fully-qualified query history table path
+                (default: "system.query.history").
             lookback_minutes: How far back to search for matching queries (default: 30).
         """
         self.warehouse_id = warehouse_id
-        self.system_catalog = system_catalog
+        self.query_history_table = query_history_table
         self.lookback_minutes = lookback_minutes
         self._client = WorkspaceClient()
         self._lock = threading.Lock()
@@ -196,7 +197,7 @@ class QueryHistoryClient:
             compute.warehouse_id as warehouse_id,
             query_source.genie_space_id as genie_space_id,
             query_source.genie_conversation_id as genie_conversation_id
-        FROM {self.system_catalog}.query.history
+        FROM {self.query_history_table}
         WHERE start_time >= '{start_ts}'
           AND start_time <= '{end_ts}'
           AND statement_text LIKE '{sql_prefix}%'
@@ -323,7 +324,7 @@ class QueryHistoryClient:
             compute.warehouse_id as warehouse_id,
             query_source.genie_space_id as genie_space_id,
             query_source.genie_conversation_id as genie_conversation_id
-        FROM {self.system_catalog}.query.history
+        FROM {self.query_history_table}
         WHERE start_time >= '{start_ts}'
           AND start_time <= '{end_ts}'
           AND query_source.genie_space_id IS NOT NULL
@@ -387,7 +388,7 @@ def get_query_history_client() -> Optional[QueryHistoryClient]:
     
     Initializes the client on first call using environment variables:
     - GENIE_WAREHOUSE_ID: Required warehouse ID
-    - SYSTEM_CATALOG: Optional catalog name (default: "system")
+    - SYSTEM_QUERY_HISTORY_TABLE: Fully-qualified table path (default: system.query.history)
     
     Returns:
         QueryHistoryClient instance, or None if warehouse ID not configured.
@@ -398,10 +399,12 @@ def get_query_history_client() -> Optional[QueryHistoryClient]:
         if _query_history_client is None:
             warehouse_id = os.environ.get("GENIE_WAREHOUSE_ID", "")
             if warehouse_id:
-                system_catalog = os.environ.get("SYSTEM_CATALOG", "system")
+                query_history_table = os.environ.get(
+                    "SYSTEM_QUERY_HISTORY_TABLE", "system.query.history"
+                )
                 _query_history_client = QueryHistoryClient(
                     warehouse_id=warehouse_id,
-                    system_catalog=system_catalog,
+                    query_history_table=query_history_table,
                 )
         
         return _query_history_client

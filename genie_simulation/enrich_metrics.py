@@ -2,12 +2,16 @@
 Enrich detailed metrics with SQL execution data from system tables.
 
 This module provides post-processing functionality to add:
-1. SQL execution metrics from system.query.history (execution time, compilation, etc.)
-2. AI overhead from system.access.audit (time from message to first SQL query)
+1. SQL execution metrics from query history table (execution time, compilation, etc.)
+2. AI overhead from audit table (time from message to first SQL query)
 3. Bottleneck classification and speed categorization
 
 The enrichment must be run after the system tables have been updated
 with the data, which typically takes 15-30 minutes after the queries execute.
+
+System table paths are configurable via environment variables:
+- SYSTEM_QUERY_HISTORY_TABLE (default: system.query.history)
+- SYSTEM_ACCESS_AUDIT_TABLE (default: system.access.audit)
 
 Usage:
     from genie_simulation.enrich_metrics import enrich_metrics_with_query_history
@@ -27,6 +31,20 @@ from typing import Optional
 import pandas as pd
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.sql import StatementState
+
+# Default fully-qualified table paths (standard Databricks system table locations)
+DEFAULT_QUERY_HISTORY_TABLE = "system.query.history"
+DEFAULT_ACCESS_AUDIT_TABLE = "system.access.audit"
+
+
+def _get_query_history_table() -> str:
+    """Get the fully-qualified query history table path from env or default."""
+    return os.environ.get("SYSTEM_QUERY_HISTORY_TABLE", DEFAULT_QUERY_HISTORY_TABLE)
+
+
+def _get_access_audit_table() -> str:
+    """Get the fully-qualified access audit table path from env or default."""
+    return os.environ.get("SYSTEM_ACCESS_AUDIT_TABLE", DEFAULT_ACCESS_AUDIT_TABLE)
 
 
 def normalize_sql(sql: str) -> str:
@@ -108,7 +126,7 @@ def get_query_history_for_timerange(
     warehouse_id: str,
     start_time: datetime,
     end_time: datetime,
-    system_catalog: str = "system",
+    query_history_table: Optional[str] = None,
     client: Optional[WorkspaceClient] = None,
 ) -> pd.DataFrame:
     """
@@ -118,7 +136,7 @@ def get_query_history_for_timerange(
         warehouse_id: SQL warehouse ID to use for querying.
         start_time: Start of the time range.
         end_time: End of the time range.
-        system_catalog: Catalog containing system tables (default: "system").
+        query_history_table: Fully-qualified table path (default: from env or system.query.history).
         client: Optional WorkspaceClient instance.
         
     Returns:
@@ -127,12 +145,15 @@ def get_query_history_for_timerange(
     if client is None:
         client = WorkspaceClient()
     
+    if query_history_table is None:
+        query_history_table = _get_query_history_table()
+    
     # Format timestamps
     start_ts = start_time.strftime("%Y-%m-%d %H:%M:%S")
     end_ts = end_time.strftime("%Y-%m-%d %H:%M:%S")
     
-    # Query system.query.history for SQL execution metrics
-    # Column mapping (system.query.history -> our field names):
+    # Query the history table for SQL execution metrics
+    # Column mapping (query history -> our field names):
     #   - statement_id -> sql_statement_id
     #   - total_duration_ms -> sql_total_duration_ms (total time in warehouse)
     #   - execution_duration_ms -> sql_execution_time_ms (time executing)
@@ -167,7 +188,7 @@ def get_query_history_for_timerange(
         compute.warehouse_id as warehouse_id,
         query_source.genie_space_id as genie_space_id,
         query_source.genie_conversation_id as genie_conversation_id
-    FROM {system_catalog}.query.history
+    FROM {query_history_table}
     WHERE start_time >= '{start_ts}'
       AND start_time <= '{end_ts}'
       AND query_source.genie_space_id IS NOT NULL
@@ -222,14 +243,14 @@ def get_audit_events_for_timerange(
     start_time: datetime,
     end_time: datetime,
     space_id: str,
-    system_catalog: str = "system",
+    access_audit_table: Optional[str] = None,
     client: Optional[WorkspaceClient] = None,
 ) -> pd.DataFrame:
     """
-    Fetch Genie audit events from system.access.audit for AI overhead calculation.
+    Fetch Genie audit events from audit table for AI overhead calculation.
     
     The audit log captures when Genie API received a message. By comparing this
-    with the query start_time from system.query.history, we can calculate the
+    with the query start_time from query history, we can calculate the
     AI overhead (NL-to-SQL inference time).
     
     Args:
@@ -237,7 +258,7 @@ def get_audit_events_for_timerange(
         start_time: Start of the time range.
         end_time: End of the time range.
         space_id: Genie space ID to filter events.
-        system_catalog: Catalog containing system tables (default: "system").
+        access_audit_table: Fully-qualified table path (default: from env or system.access.audit).
         client: Optional WorkspaceClient instance.
         
     Returns:
@@ -246,13 +267,16 @@ def get_audit_events_for_timerange(
     if client is None:
         client = WorkspaceClient()
     
+    if access_audit_table is None:
+        access_audit_table = _get_access_audit_table()
+    
     # Format timestamps for date filter (audit uses event_date for partition pruning)
     start_date = start_time.strftime("%Y-%m-%d")
     end_date = (end_time + timedelta(days=1)).strftime("%Y-%m-%d")
     start_ts = start_time.strftime("%Y-%m-%d %H:%M:%S")
     end_ts = end_time.strftime("%Y-%m-%d %H:%M:%S")
     
-    # Query system.access.audit for Genie message events
+    # Query audit table for Genie message events
     # These events record when the Genie API received a user message
     query = f"""
     SELECT
@@ -261,7 +285,7 @@ def get_audit_events_for_timerange(
         request_params.message_id as message_id,
         user_identity.email as user_email,
         action_name
-    FROM {system_catalog}.access.audit
+    FROM {access_audit_table}
     WHERE service_name = 'aibiGenie'
       AND event_date >= '{start_date}'
       AND event_date <= '{end_date}'
@@ -524,16 +548,19 @@ def _compute_ai_overhead(
 def enrich_metrics_with_query_history(
     metrics_csv_path: str,
     warehouse_id: Optional[str] = None,
-    system_catalog: Optional[str] = None,
+    query_history_table: Optional[str] = None,
+    access_audit_table: Optional[str] = None,
     output_path: Optional[str] = None,
     time_buffer_minutes: int = 30,
+    # Deprecated: use query_history_table instead
+    system_catalog: Optional[str] = None,
 ) -> pd.DataFrame:
     """
     Enrich detailed_metrics.csv with SQL execution metrics and AI overhead.
     
     This function:
-    1. Queries system.query.history for SQL execution metrics
-    2. Queries system.access.audit for AI overhead (message -> query timing)
+    1. Queries query history table for SQL execution metrics
+    2. Queries audit table for AI overhead (message -> query timing)
     3. Adds bottleneck classification and speed categorization
     
     Should be run after the load test completes AND after waiting for the
@@ -542,9 +569,13 @@ def enrich_metrics_with_query_history(
     Args:
         metrics_csv_path: Path to the detailed_metrics.csv file.
         warehouse_id: SQL warehouse ID (default: from GENIE_WAREHOUSE_ID env var).
-        system_catalog: System catalog name (default: from SYSTEM_CATALOG env var or "system").
+        query_history_table: Fully-qualified query history table path
+            (default: from SYSTEM_QUERY_HISTORY_TABLE env var or system.query.history).
+        access_audit_table: Fully-qualified access audit table path
+            (default: from SYSTEM_ACCESS_AUDIT_TABLE env var or system.access.audit).
         output_path: Optional output path (default: overwrites input file).
         time_buffer_minutes: Extra time buffer around test window (default: 30).
+        system_catalog: Deprecated. Use query_history_table/access_audit_table instead.
         
     Returns:
         Enriched DataFrame with SQL execution metrics.
@@ -555,8 +586,15 @@ def enrich_metrics_with_query_history(
     if not warehouse_id:
         raise ValueError("warehouse_id is required (or set GENIE_WAREHOUSE_ID env var)")
     
-    if system_catalog is None:
-        system_catalog = os.environ.get("SYSTEM_CATALOG", "system")
+    # Handle deprecated system_catalog parameter for backward compatibility
+    if system_catalog is not None and query_history_table is None and access_audit_table is None:
+        query_history_table = f"{system_catalog}.query.history"
+        access_audit_table = f"{system_catalog}.access.audit"
+    
+    if query_history_table is None:
+        query_history_table = _get_query_history_table()
+    if access_audit_table is None:
+        access_audit_table = _get_access_audit_table()
     
     if output_path is None:
         output_path = metrics_csv_path
@@ -590,13 +628,13 @@ def enrich_metrics_with_query_history(
         print("  No SQL queries to enrich")
         return metrics_df
     
-    # Fetch query history from system.query.history
-    print(f"Fetching query history from {system_catalog}.query.history...")
+    # Fetch query history
+    print(f"Fetching query history from {query_history_table}...")
     history_df = get_query_history_for_timerange(
         warehouse_id=warehouse_id,
         start_time=start_time,
         end_time=end_time,
-        system_catalog=system_catalog,
+        query_history_table=query_history_table,
     )
     print(f"  Found {len(history_df)} query history entries")
     
@@ -605,18 +643,18 @@ def enrich_metrics_with_query_history(
         print("  System tables typically have 15-30 minute ingestion delay.")
         return metrics_df
     
-    # Fetch audit events from system.access.audit for AI overhead
+    # Fetch audit events for AI overhead
     audit_df = pd.DataFrame()
     space_id = metrics_df["space_id"].iloc[0] if "space_id" in metrics_df.columns else None
     if space_id:
-        print(f"Fetching audit events from {system_catalog}.access.audit...")
+        print(f"Fetching audit events from {access_audit_table}...")
         try:
             audit_df = get_audit_events_for_timerange(
                 warehouse_id=warehouse_id,
                 start_time=start_time,
                 end_time=end_time,
                 space_id=space_id,
-                system_catalog=system_catalog,
+                access_audit_table=access_audit_table,
             )
             print(f"  Found {len(audit_df)} audit events")
         except Exception as e:
@@ -643,7 +681,7 @@ def enrich_metrics_with_query_history(
     if enriched_count > 0:
         # Show data source summary
         print(f"\nData Sources:")
-        print(f"  {system_catalog}.query.history -> SQL execution metrics:")
+        print(f"  {query_history_table} -> SQL execution metrics:")
         print(f"    sql_total_duration_ms, sql_execution_time_ms, sql_compilation_time_ms")
         print(f"    sql_queue_wait_ms, sql_compute_wait_ms, sql_result_fetch_ms")
         print(f"    sql_rows_produced, sql_bytes_read, sql_rows_read")
@@ -654,7 +692,7 @@ def enrich_metrics_with_query_history(
             overhead_count = enriched_df["ai_overhead_ms"].notna().sum()
             if overhead_count > 0:
                 avg_overhead = enriched_df["ai_overhead_ms"].mean()
-                print(f"  {system_catalog}.access.audit -> AI overhead:")
+                print(f"  {access_audit_table} -> AI overhead:")
                 print(f"    ai_overhead_ms: {overhead_count} rows, avg {avg_overhead:.0f}ms")
         
         # Bottleneck summary
@@ -671,6 +709,9 @@ def enrich_metrics_with_query_history(
 def enrich_results_directory(
     results_dir: str,
     warehouse_id: Optional[str] = None,
+    query_history_table: Optional[str] = None,
+    access_audit_table: Optional[str] = None,
+    # Deprecated: use query_history_table/access_audit_table instead
     system_catalog: Optional[str] = None,
 ) -> Optional[pd.DataFrame]:
     """
@@ -681,7 +722,9 @@ def enrich_results_directory(
     Args:
         results_dir: Path to the results directory.
         warehouse_id: SQL warehouse ID (optional, uses env var).
-        system_catalog: System catalog name (optional, uses env var).
+        query_history_table: Fully-qualified query history table path (optional, uses env var).
+        access_audit_table: Fully-qualified access audit table path (optional, uses env var).
+        system_catalog: Deprecated. Use query_history_table/access_audit_table instead.
         
     Returns:
         Enriched DataFrame, or None if file not found.
@@ -695,5 +738,7 @@ def enrich_results_directory(
     return enrich_metrics_with_query_history(
         metrics_csv_path=str(metrics_path),
         warehouse_id=warehouse_id,
+        query_history_table=query_history_table,
+        access_audit_table=access_audit_table,
         system_catalog=system_catalog,
     )

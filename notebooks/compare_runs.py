@@ -112,9 +112,11 @@ dbutils.widgets.text("space_id_filter", "", "Filter by Space ID (leave blank for
 default_warehouse_id = os.environ.get("GENIE_WAREHOUSE_ID", "")
 dbutils.widgets.text("warehouse_id", default_warehouse_id, "SQL Warehouse ID (for enrichment)")
 
-# Widget for system catalog (defaults to "system", can be a view catalog)
-default_system_catalog = os.environ.get("SYSTEM_CATALOG", "system")
-dbutils.widgets.text("system_catalog", default_system_catalog, "System Catalog (default: system)")
+# Widgets for system table paths (fully-qualified: catalog.schema.table)
+default_query_history_table = os.environ.get("SYSTEM_QUERY_HISTORY_TABLE", "system.query.history")
+default_access_audit_table = os.environ.get("SYSTEM_ACCESS_AUDIT_TABLE", "system.access.audit")
+dbutils.widgets.text("query_history_table", default_query_history_table, "Query History Table")
+dbutils.widgets.text("access_audit_table", default_access_audit_table, "Access Audit Table")
 
 # COMMAND ----------
 
@@ -242,7 +244,8 @@ print(f"Concurrent user levels: {sorted(combined_df['concurrent_users'].unique()
 
 # Enrich each directory's metrics if needed
 warehouse_id = dbutils.widgets.get("warehouse_id").strip() or os.environ.get("GENIE_WAREHOUSE_ID", "")
-system_catalog = dbutils.widgets.get("system_catalog").strip() or os.environ.get("SYSTEM_CATALOG", "system")
+query_history_table = dbutils.widgets.get("query_history_table").strip() or os.environ.get("SYSTEM_QUERY_HISTORY_TABLE", "system.query.history")
+access_audit_table = dbutils.widgets.get("access_audit_table").strip() or os.environ.get("SYSTEM_ACCESS_AUDIT_TABLE", "system.access.audit")
 
 if warehouse_id:
     import sys
@@ -263,7 +266,8 @@ if warehouse_id:
                 enrich_results_directory(
                     results_dir=dir_path,
                     warehouse_id=warehouse_id,
-                    system_catalog=system_catalog,
+                    query_history_table=query_history_table,
+                    access_audit_table=access_audit_table,
                 )
                 any_enriched = True
             except Exception as e:

@@ -91,18 +91,23 @@ dbutils.widgets.text("results_dir", default_dir, "Results Directory")
 default_warehouse_id = os.environ.get("GENIE_WAREHOUSE_ID", "")
 dbutils.widgets.text("warehouse_id", default_warehouse_id, "SQL Warehouse ID (for enrichment)")
 
-# Widget for system catalog (defaults to "system", can be a view catalog)
-default_system_catalog = os.environ.get("SYSTEM_CATALOG", "system")
-dbutils.widgets.text("system_catalog", default_system_catalog, "System Catalog (default: system)")
+# Widgets for system table paths (fully-qualified: catalog.schema.table)
+# Override when system tables are exposed via views in a different catalog/schema
+default_query_history_table = os.environ.get("SYSTEM_QUERY_HISTORY_TABLE", "system.query.history")
+default_access_audit_table = os.environ.get("SYSTEM_ACCESS_AUDIT_TABLE", "system.access.audit")
+dbutils.widgets.text("query_history_table", default_query_history_table, "Query History Table")
+dbutils.widgets.text("access_audit_table", default_access_audit_table, "Access Audit Table")
 
 # COMMAND ----------
 
 results_dir = dbutils.widgets.get("results_dir")
 warehouse_id = dbutils.widgets.get("warehouse_id").strip() or os.environ.get("GENIE_WAREHOUSE_ID", "")
-system_catalog = dbutils.widgets.get("system_catalog").strip() or os.environ.get("SYSTEM_CATALOG", "system")
+query_history_table = dbutils.widgets.get("query_history_table").strip() or os.environ.get("SYSTEM_QUERY_HISTORY_TABLE", "system.query.history")
+access_audit_table = dbutils.widgets.get("access_audit_table").strip() or os.environ.get("SYSTEM_ACCESS_AUDIT_TABLE", "system.access.audit")
 print(f"Analyzing results from: {results_dir}")
 print(f"SQL Warehouse ID: {warehouse_id if warehouse_id else '(not set - needed for SQL metrics enrichment)'}")
-print(f"System Catalog: {system_catalog}")
+print(f"Query History Table: {query_history_table}")
+print(f"Access Audit Table: {access_audit_table}")
 
 # COMMAND ----------
 
@@ -1240,7 +1245,7 @@ if not detailed_metrics_df.empty:
         if enriched_count == 0 and sql_count > 0:
             enrichment_needed = True
             print(f"⚠️  SQL execution metrics are empty ({enriched_count}/{sql_count} rows enriched)")
-            print(f"   Attempting automatic enrichment from {system_catalog}.query.history...")
+            print(f"   Attempting automatic enrichment from {query_history_table}...")
         else:
             print(f"✓ SQL execution metrics present: {enriched_count}/{sql_count} rows ({enriched_count/sql_count*100:.1f}% coverage)")
     elif 'sql_execution_time_ms' in detailed_metrics_df.columns:
@@ -1249,7 +1254,7 @@ if not detailed_metrics_df.empty:
         if enriched_count == 0 and sql_count > 0:
             enrichment_needed = True
             print(f"⚠️  SQL execution metrics are empty ({enriched_count}/{sql_count} rows enriched)")
-            print(f"   Attempting automatic enrichment from {system_catalog}.query.history...")
+            print(f"   Attempting automatic enrichment from {query_history_table}...")
         else:
             print(f"✓ SQL execution metrics present: {enriched_count}/{sql_count} rows ({enriched_count/sql_count*100:.1f}% coverage)")
     elif sql_count > 0:
@@ -1291,7 +1296,8 @@ if enrichment_needed and warehouse_id:
         enriched_df = enrich_metrics_with_query_history(
             metrics_csv_path=str(metrics_path),
             warehouse_id=warehouse_id,
-            system_catalog=system_catalog,
+            query_history_table=query_history_table,
+            access_audit_table=access_audit_table,
         )
         
         # Reload the dataframe
@@ -1303,7 +1309,7 @@ if enrichment_needed and warehouse_id:
         print(f"❌ Enrichment failed: {e}")
         print("\n   Possible causes:")
         print("   - Invalid warehouse ID")
-        print(f"   - Insufficient permissions on {system_catalog}.query.history")
+        print(f"   - Insufficient permissions on {query_history_table}")
         print("   - Load test too recent (data not yet in system tables)")
 elif enrichment_needed and not warehouse_id:
     print("⚠️  SQL metrics enrichment skipped - no warehouse ID provided")
@@ -1349,7 +1355,7 @@ if not detailed_metrics_df.empty and has_sql_metrics:
     
     if len(sql_exec_df) > 0:
         print("=" * 70)
-        print(f"SQL EXECUTION METRICS (from {system_catalog}.query.history)")
+        print(f"SQL EXECUTION METRICS (from {query_history_table})")
         print("=" * 70)
         
         # Calculate overhead (end-to-end time minus SQL total time in warehouse)
@@ -1517,10 +1523,10 @@ if not detailed_metrics_df.empty and has_sql_metrics:
             
     else:
         print("No SQL execution metrics available (column is empty)")
-        print(f"Run enrichment after waiting 15-30 minutes for {system_catalog}.query.history ingestion")
+        print(f"Run enrichment after waiting 15-30 minutes for {query_history_table} ingestion")
 else:
     print("No SQL execution metrics columns found in detailed_metrics.csv")
-    print(f"These metrics are populated by post-processing enrichment from {system_catalog}.query.history")
+    print(f"These metrics are populated by post-processing enrichment from {query_history_table}")
 
 # COMMAND ----------
 
@@ -1545,7 +1551,7 @@ if not detailed_metrics_df.empty and 'ai_overhead_ms' in detailed_metrics_df.col
     
     if len(ai_df) > 0:
         print("=" * 70)
-        print(f"AI OVERHEAD ANALYSIS (from {system_catalog}.access.audit)")
+        print(f"AI OVERHEAD ANALYSIS (from {access_audit_table})")
         print("=" * 70)
         
         ai_secs = ai_df['ai_overhead_ms'] / 1000
@@ -1613,9 +1619,9 @@ if not detailed_metrics_df.empty and 'ai_overhead_ms' in detailed_metrics_df.col
         plt.show()
     else:
         print("No AI overhead data available")
-        print(f"AI overhead requires {system_catalog}.access.audit data (enrichment with warehouse_id)")
+        print(f"AI overhead requires {access_audit_table} data (enrichment with warehouse_id)")
 else:
-    print(f"No AI overhead data in metrics - this is computed from {system_catalog}.access.audit during enrichment")
+    print(f"No AI overhead data in metrics - this is computed from {access_audit_table} during enrichment")
 
 # COMMAND ----------
 
