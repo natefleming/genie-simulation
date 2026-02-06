@@ -511,9 +511,10 @@ class CachedGenieLoadTestUser(User):
             duration_ms = (time.time() - start_time) * 1000
 
             # Record detailed metrics
-            # Note: SQL execution metrics (sql_execution_time_ms, etc.) are populated
-            # via post-processing after the load test completes, since system.query.history
-            # has ingestion latency of 15-30 minutes.
+            # Note: sql_statement_id is captured at runtime from GenieResponse.
+            # Remaining SQL execution metrics (sql_execution_time_ms, etc.) are
+            # populated via post-processing using the statement_id to query
+            # system.query.history after its ingestion delay (15-30 minutes).
             run_id = os.path.basename(os.environ.get("GENIE_RESULTS_DIR", "unknown_run"))
             space_id = os.environ.get("GENIE_SPACE_ID", "unknown_space")
             sql_query = response.query if response else None
@@ -532,6 +533,7 @@ class CachedGenieLoadTestUser(User):
                 genie_message_id=response.message_id if response else None,
                 message_index=i,
                 sql=sql_query,
+                sql_statement_id=response.statement_id if response else None,
                 response_size=response_length,
                 success=exception is None,
                 error=str(exception) if exception else None,

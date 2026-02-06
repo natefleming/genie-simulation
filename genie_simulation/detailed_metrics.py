@@ -36,12 +36,17 @@ class RequestMetric:
     response_size: int
     success: bool
     error: Optional[str]
-    # ---- Post-processing enrichment fields ----
-    # These are populated by enrich_metrics.py after waiting for system table
-    # ingestion (15-30 min delay). They are NOT set during load test execution.
+    # ---- Runtime + post-processing enrichment fields ----
     #
-    # From system.query.history:
-    #   - statement_id -> sql_statement_id
+    # sql_statement_id is captured at runtime from GenieResponse.statement_id,
+    # enabling deterministic matching against system.query.history during
+    # post-processing enrichment (enrich_metrics.py). This eliminates the need
+    # for fuzzy SQL text matching or time-proximity heuristics.
+    #
+    # Remaining fields are populated by enrich_metrics.py after waiting for
+    # system table ingestion (15-30 min delay).
+    #
+    # From system.query.history (looked up by sql_statement_id):
     #   - total_duration_ms -> sql_total_duration_ms
     #   - execution_duration_ms -> sql_execution_time_ms
     #   - compilation_duration_ms -> sql_compilation_time_ms
@@ -60,7 +65,7 @@ class RequestMetric:
     # Derived metrics:
     #   - sql_bottleneck: Classification (COMPUTE_STARTUP, QUEUE_WAIT, etc.)
     #   - sql_speed_category: Speed bucket (FAST, MODERATE, SLOW, CRITICAL)
-    sql_statement_id: Optional[str] = None  # Statement ID from query history
+    sql_statement_id: Optional[str] = None  # Statement ID captured from GenieResponse
     sql_total_duration_ms: Optional[float] = None  # Total time query spent in warehouse
     sql_execution_time_ms: Optional[float] = None  # Time spent executing SQL in warehouse
     sql_compilation_time_ms: Optional[float] = None  # Time spent compiling/planning SQL

@@ -2,9 +2,13 @@
 Enrich detailed metrics with SQL execution data from system tables.
 
 This module provides post-processing functionality to add:
-1. SQL execution metrics from query history table (execution time, compilation, etc.)
+1. SQL execution metrics from query history (looked up by statement_id)
 2. AI overhead from audit table (time from message to first SQL query)
 3. Bottleneck classification and speed categorization
+
+The statement_id is captured at runtime from GenieResponse.statement_id,
+enabling deterministic matching against system.query.history without
+fuzzy SQL text or time-based heuristics.
 
 The enrichment must be run after the system tables have been updated
 with the data, which typically takes 15-30 minutes after the queries execute.
@@ -45,15 +49,6 @@ def _get_query_history_table() -> str:
 def _get_access_audit_table() -> str:
     """Get the fully-qualified access audit table path from env or default."""
     return os.environ.get("SYSTEM_ACCESS_AUDIT_TABLE", DEFAULT_ACCESS_AUDIT_TABLE)
-
-
-def normalize_sql(sql: str) -> str:
-    """Normalize SQL for matching by removing whitespace variations."""
-    if not sql or pd.isna(sql):
-        return ""
-    # Remove extra whitespace and normalize
-    normalized = " ".join(str(sql).split())
-    return normalized.strip().lower()
 
 
 def classify_bottleneck(row: pd.Series) -> str:
@@ -122,120 +117,130 @@ def classify_speed(duration_ms: float) -> str:
         return "CRITICAL"
 
 
-def get_query_history_for_timerange(
+# Column rename mapping: query history column -> metrics column
+_HISTORY_TO_METRICS_COLUMNS: dict[str, str] = {
+    "total_duration_ms": "sql_total_duration_ms",
+    "execution_duration_ms": "sql_execution_time_ms",
+    "compilation_duration_ms": "sql_compilation_time_ms",
+    "queue_wait_ms": "sql_queue_wait_ms",
+    "compute_wait_ms": "sql_compute_wait_ms",
+    "result_fetch_ms": "sql_result_fetch_ms",
+    "rows_produced": "sql_rows_produced",
+    "bytes_read": "sql_bytes_read",
+    "rows_read": "sql_rows_read",
+    "error_message": "sql_error_message",
+    "warehouse_id": "sql_warehouse_id",
+}
+
+
+def get_query_history_by_statement_ids(
     warehouse_id: str,
-    start_time: datetime,
-    end_time: datetime,
+    statement_ids: list[str],
     query_history_table: Optional[str] = None,
     client: Optional[WorkspaceClient] = None,
 ) -> pd.DataFrame:
     """
-    Fetch all query history entries for a time range.
+    Fetch query history entries by their statement_ids.
+    
+    Uses a direct WHERE IN clause for deterministic lookup by the
+    statement_ids captured from GenieResponse at runtime.
     
     Args:
         warehouse_id: SQL warehouse ID to use for querying.
-        start_time: Start of the time range.
-        end_time: End of the time range.
+        statement_ids: List of SQL statement IDs to look up.
         query_history_table: Fully-qualified table path (default: from env or system.query.history).
         client: Optional WorkspaceClient instance.
         
     Returns:
-        DataFrame with query history entries.
+        DataFrame with query history entries matching the given statement_ids.
     """
+    if not statement_ids:
+        return pd.DataFrame()
+    
     if client is None:
         client = WorkspaceClient()
     
     if query_history_table is None:
         query_history_table = _get_query_history_table()
     
-    # Format timestamps
-    start_ts = start_time.strftime("%Y-%m-%d %H:%M:%S")
-    end_ts = end_time.strftime("%Y-%m-%d %H:%M:%S")
-    
-    # Query the history table for SQL execution metrics
-    # Column mapping (query history -> our field names):
-    #   - statement_id -> sql_statement_id
-    #   - total_duration_ms -> sql_total_duration_ms (total time in warehouse)
-    #   - execution_duration_ms -> sql_execution_time_ms (time executing)
-    #   - compilation_duration_ms -> sql_compilation_time_ms (time planning)
-    #   - waiting_at_capacity_duration_ms -> sql_queue_wait_ms (waiting in queue)
-    #   - waiting_for_compute_duration_ms -> sql_compute_wait_ms (waiting for startup)
-    #   - result_fetch_duration_ms -> sql_result_fetch_ms (fetching results)
-    #   - produced_rows -> sql_rows_produced
-    #   - read_bytes -> sql_bytes_read
-    #   - read_rows -> sql_rows_read (rows scanned, not returned)
-    #   - error_message -> sql_error_message (reason for failure)
-    #   - compute.warehouse_id -> sql_warehouse_id (which warehouse ran the query)
-    #   - query_source.genie_space_id -> (used for filtering to Genie queries)
-    #   - query_source.genie_conversation_id -> (used for matching)
-    query = f"""
-    SELECT
-        statement_id,
-        statement_text,
-        start_time,
-        end_time,
-        COALESCE(total_duration_ms, 0) as total_duration_ms,
-        COALESCE(execution_duration_ms, 0) as execution_duration_ms,
-        COALESCE(compilation_duration_ms, 0) as compilation_duration_ms,
-        COALESCE(waiting_at_capacity_duration_ms, 0) as queue_wait_ms,
-        COALESCE(waiting_for_compute_duration_ms, 0) as compute_wait_ms,
-        COALESCE(result_fetch_duration_ms, 0) as result_fetch_ms,
-        COALESCE(produced_rows, 0) as rows_produced,
-        COALESCE(read_bytes, 0) as bytes_read,
-        COALESCE(read_rows, 0) as rows_read,
-        execution_status,
-        error_message,
-        compute.warehouse_id as warehouse_id,
-        query_source.genie_space_id as genie_space_id,
-        query_source.genie_conversation_id as genie_conversation_id
-    FROM {query_history_table}
-    WHERE start_time >= '{start_ts}'
-      AND start_time <= '{end_ts}'
-      AND query_source.genie_space_id IS NOT NULL
-    ORDER BY start_time
-    """
-    
-    try:
-        response = client.statement_execution.execute_statement(
-            warehouse_id=warehouse_id,
-            statement=query,
-            wait_timeout="50s",
-        )
-        
-        if response.status and response.status.state == StatementState.SUCCEEDED:
-            if response.result and response.result.data_array:
-                columns = [
-                    "statement_id", "statement_text", "start_time", "end_time",
-                    "total_duration_ms", "execution_duration_ms", "compilation_duration_ms",
-                    "queue_wait_ms", "compute_wait_ms", "result_fetch_ms",
-                    "rows_produced", "bytes_read", "rows_read",
-                    "execution_status", "error_message", "warehouse_id",
-                    "genie_space_id", "genie_conversation_id"
-                ]
-                df = pd.DataFrame(response.result.data_array, columns=columns)
-                
-                # Convert numeric types
-                numeric_cols = [
-                    "total_duration_ms", "execution_duration_ms", "compilation_duration_ms",
-                    "queue_wait_ms", "compute_wait_ms", "result_fetch_ms"
-                ]
-                for col in numeric_cols:
-                    df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-                
-                df["rows_produced"] = pd.to_numeric(df["rows_produced"], errors="coerce").fillna(0).astype(int)
-                df["bytes_read"] = pd.to_numeric(df["bytes_read"], errors="coerce").fillna(0).astype(int)
-                df["rows_read"] = pd.to_numeric(df["rows_read"], errors="coerce").fillna(0).astype(int)
-                
-                # Normalize SQL for matching
-                df["sql_normalized"] = df["statement_text"].apply(normalize_sql)
-                
-                return df
-                
+    # Escape and format statement IDs for SQL IN clause
+    escaped_ids = [sid.replace("'", "''") for sid in statement_ids if sid]
+    if not escaped_ids:
         return pd.DataFrame()
+    
+    # Process in batches to avoid SQL length limits
+    batch_size = 500
+    all_results: list[pd.DataFrame] = []
+    
+    for i in range(0, len(escaped_ids), batch_size):
+        batch = escaped_ids[i : i + batch_size]
+        id_list = ", ".join(f"'{sid}'" for sid in batch)
         
-    except Exception as e:
-        print(f"Error fetching query history: {e}")
+        query = f"""
+        SELECT
+            statement_id,
+            start_time,
+            end_time,
+            COALESCE(total_duration_ms, 0) as total_duration_ms,
+            COALESCE(execution_duration_ms, 0) as execution_duration_ms,
+            COALESCE(compilation_duration_ms, 0) as compilation_duration_ms,
+            COALESCE(waiting_at_capacity_duration_ms, 0) as queue_wait_ms,
+            COALESCE(waiting_for_compute_duration_ms, 0) as compute_wait_ms,
+            COALESCE(result_fetch_duration_ms, 0) as result_fetch_ms,
+            COALESCE(produced_rows, 0) as rows_produced,
+            COALESCE(read_bytes, 0) as bytes_read,
+            COALESCE(read_rows, 0) as rows_read,
+            execution_status,
+            error_message,
+            compute.warehouse_id as warehouse_id,
+            query_source.genie_space_id as genie_space_id,
+            query_source.genie_conversation_id as genie_conversation_id
+        FROM {query_history_table}
+        WHERE statement_id IN ({id_list})
+        ORDER BY start_time
+        """
+        
+        try:
+            response = client.statement_execution.execute_statement(
+                warehouse_id=warehouse_id,
+                statement=query,
+                wait_timeout="50s",
+            )
+            
+            if response.status and response.status.state == StatementState.SUCCEEDED:
+                if response.result and response.result.data_array:
+                    columns = [
+                        "statement_id", "start_time", "end_time",
+                        "total_duration_ms", "execution_duration_ms", "compilation_duration_ms",
+                        "queue_wait_ms", "compute_wait_ms", "result_fetch_ms",
+                        "rows_produced", "bytes_read", "rows_read",
+                        "execution_status", "error_message", "warehouse_id",
+                        "genie_space_id", "genie_conversation_id",
+                    ]
+                    batch_df = pd.DataFrame(response.result.data_array, columns=columns)
+                    all_results.append(batch_df)
+                    
+        except Exception as e:
+            print(f"Error fetching query history by statement_ids (batch {i // batch_size}): {e}")
+    
+    if not all_results:
         return pd.DataFrame()
+    
+    df = pd.concat(all_results, ignore_index=True)
+    
+    # Convert numeric types
+    numeric_cols = [
+        "total_duration_ms", "execution_duration_ms", "compilation_duration_ms",
+        "queue_wait_ms", "compute_wait_ms", "result_fetch_ms",
+    ]
+    for col in numeric_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    
+    df["rows_produced"] = pd.to_numeric(df["rows_produced"], errors="coerce").fillna(0).astype(int)
+    df["bytes_read"] = pd.to_numeric(df["bytes_read"], errors="coerce").fillna(0).astype(int)
+    df["rows_read"] = pd.to_numeric(df["rows_read"], errors="coerce").fillna(0).astype(int)
+    
+    return df
 
 
 def get_audit_events_for_timerange(
@@ -313,7 +318,7 @@ def get_audit_events_for_timerange(
             if response.result and response.result.data_array:
                 columns = [
                     "message_time", "conversation_id", "message_id",
-                    "user_email", "action_name"
+                    "user_email", "action_name",
                 ]
                 df = pd.DataFrame(response.result.data_array, columns=columns)
                 df["message_time"] = pd.to_datetime(df["message_time"])
@@ -326,145 +331,73 @@ def get_audit_events_for_timerange(
         return pd.DataFrame()
 
 
-def match_queries(
+def enrich_with_query_history(
     metrics_df: pd.DataFrame,
     history_df: pd.DataFrame,
     audit_df: Optional[pd.DataFrame] = None,
-    time_tolerance_seconds: int = 300,
 ) -> pd.DataFrame:
     """
-    Match metrics rows with query history entries.
+    Enrich metrics with query history data using a merge on statement_id.
     
-    Uses a two-tier matching strategy:
-    1. Primary: Match by genie_conversation_id (most reliable)
-    2. Fallback: Match by SQL text prefix + timestamp proximity
-    
-    Optionally computes AI overhead from audit events.
+    Joins metrics rows to query history by sql_statement_id, then applies
+    bottleneck classification and speed categorization. Optionally computes
+    AI overhead from audit events.
     
     Args:
-        metrics_df: DataFrame with detailed metrics.
-        history_df: DataFrame with query history.
+        metrics_df: DataFrame with detailed metrics (must have sql_statement_id column).
+        history_df: DataFrame with query history (from get_query_history_by_statement_ids).
         audit_df: Optional DataFrame with audit events for AI overhead.
-        time_tolerance_seconds: Maximum time difference for matching (default: 5 min).
         
     Returns:
         Metrics DataFrame with SQL execution columns populated.
     """
     if history_df.empty:
-        print("No query history data to match")
+        print("No query history data to enrich with")
         return metrics_df
     
-    # Normalize SQL in metrics
     metrics_df = metrics_df.copy()
-    metrics_df["sql_normalized"] = metrics_df["sql"].apply(normalize_sql)
+
+    # Rename history columns to match the metrics schema
+    history_renamed = history_df.rename(columns=_HISTORY_TO_METRICS_COLUMNS)
     
-    # Convert timestamps
-    metrics_df["request_started_at"] = pd.to_datetime(metrics_df["request_started_at"])
-    history_df["start_time"] = pd.to_datetime(history_df["start_time"])
+    # Select only the columns we want to merge in
+    merge_cols = ["statement_id"] + list(_HISTORY_TO_METRICS_COLUMNS.values())
+    history_to_merge = history_renamed[merge_cols].drop_duplicates(subset=["statement_id"])
     
-    # Check if conversation ID matching is possible
-    has_conv_id = (
-        "genie_conversation_id" in metrics_df.columns
-        and "genie_conversation_id" in history_df.columns
+    # Drop existing enrichment columns from metrics_df so the merge replaces them cleanly
+    cols_to_drop = [c for c in _HISTORY_TO_METRICS_COLUMNS.values() if c in metrics_df.columns]
+    if cols_to_drop:
+        metrics_df = metrics_df.drop(columns=cols_to_drop)
+    
+    # Merge on statement_id (left join preserves all metrics rows)
+    enriched_df = metrics_df.merge(
+        history_to_merge,
+        left_on="sql_statement_id",
+        right_on="statement_id",
+        how="left",
     )
     
-    matched_count = 0
-    conv_id_matched = 0
-    sql_text_matched = 0
+    # Drop the redundant statement_id column from the merge
+    enriched_df.drop(columns=["statement_id"], inplace=True, errors="ignore")
     
-    for idx, row in metrics_df.iterrows():
-        if not row["sql_normalized"]:
-            continue
-        
-        match = None
-        
-        # Strategy 1: Match by genie_conversation_id (most reliable)
-        if has_conv_id and pd.notna(row.get("genie_conversation_id")):
-            conv_id = row["genie_conversation_id"]
-            candidates = history_df[
-                history_df["genie_conversation_id"] == conv_id
-            ]
-            
-            if not candidates.empty:
-                # If multiple queries for this conversation, match by time proximity
-                request_time = row["request_started_at"]
-                time_diffs = abs((candidates["start_time"] - request_time).dt.total_seconds())
-                candidates = candidates[time_diffs <= time_tolerance_seconds]
-                
-                if not candidates.empty:
-                    best_idx = time_diffs[candidates.index].idxmin()
-                    match = candidates.loc[best_idx]
-                    conv_id_matched += 1
-        
-        # Strategy 2: Fallback to SQL text prefix matching
-        if match is None:
-            sql_prefix = row["sql_normalized"][:100]
-            
-            candidates = history_df[
-                history_df["sql_normalized"].str.startswith(sql_prefix, na=False)
-            ]
-            
-            if candidates.empty:
-                # Try a more lenient match
-                candidates = history_df[
-                    history_df["sql_normalized"].str.contains(
-                        sql_prefix[:50].replace("(", r"\(").replace(")", r"\)"),
-                        regex=True,
-                        na=False
-                    )
-                ]
-            
-            if not candidates.empty:
-                # Filter by time proximity
-                request_time = row["request_started_at"]
-                time_diffs = abs((candidates["start_time"] - request_time).dt.total_seconds())
-                candidates = candidates[time_diffs <= time_tolerance_seconds]
-                
-                if not candidates.empty:
-                    best_idx = time_diffs.idxmin()
-                    match = candidates.loc[best_idx]
-                    sql_text_matched += 1
-        
-        if match is None:
-            continue
-        
-        # Update the metrics row with all SQL execution metrics
-        metrics_df.at[idx, "sql_statement_id"] = match["statement_id"]
-        metrics_df.at[idx, "sql_total_duration_ms"] = match["total_duration_ms"]
-        metrics_df.at[idx, "sql_execution_time_ms"] = match["execution_duration_ms"]
-        metrics_df.at[idx, "sql_compilation_time_ms"] = match["compilation_duration_ms"]
-        metrics_df.at[idx, "sql_queue_wait_ms"] = match["queue_wait_ms"]
-        metrics_df.at[idx, "sql_compute_wait_ms"] = match["compute_wait_ms"]
-        metrics_df.at[idx, "sql_result_fetch_ms"] = match["result_fetch_ms"]
-        metrics_df.at[idx, "sql_rows_produced"] = match["rows_produced"]
-        metrics_df.at[idx, "sql_bytes_read"] = match["bytes_read"]
-        metrics_df.at[idx, "sql_rows_read"] = match.get("rows_read", 0)
-        metrics_df.at[idx, "sql_error_message"] = match.get("error_message")
-        metrics_df.at[idx, "sql_warehouse_id"] = match.get("warehouse_id")
-        matched_count += 1
+    matched_count = enriched_df["sql_total_duration_ms"].notna().sum()
+    print(f"Matched {matched_count} of {len(enriched_df)} requests by statement_id")
     
     # Compute AI overhead from audit events if available
     if audit_df is not None and not audit_df.empty:
-        _compute_ai_overhead(metrics_df, history_df, audit_df)
+        _compute_ai_overhead(enriched_df, history_df, audit_df)
     
     # Add bottleneck classification and speed category for matched rows
-    enriched_mask = metrics_df["sql_total_duration_ms"].notna()
+    enriched_mask = enriched_df["sql_total_duration_ms"].notna()
     if enriched_mask.any():
-        metrics_df.loc[enriched_mask, "sql_bottleneck"] = metrics_df[enriched_mask].apply(
+        enriched_df.loc[enriched_mask, "sql_bottleneck"] = enriched_df[enriched_mask].apply(
             classify_bottleneck, axis=1
         )
-        metrics_df.loc[enriched_mask, "sql_speed_category"] = metrics_df[enriched_mask][
+        enriched_df.loc[enriched_mask, "sql_speed_category"] = enriched_df[enriched_mask][
             "sql_total_duration_ms"
         ].apply(classify_speed)
     
-    # Clean up temp column
-    metrics_df.drop(columns=["sql_normalized"], inplace=True, errors="ignore")
-    
-    print(f"Matched {matched_count} of {len(metrics_df)} requests with query history")
-    if has_conv_id:
-        print(f"  - {conv_id_matched} matched by conversation ID")
-        print(f"  - {sql_text_matched} matched by SQL text (fallback)")
-    return metrics_df
+    return enriched_df
 
 
 def _compute_ai_overhead(
@@ -488,12 +421,13 @@ def _compute_ai_overhead(
     if audit_df.empty or history_df.empty:
         return
     
-    # Build a lookup: conversation_id -> earliest query start_time
     if "genie_conversation_id" not in history_df.columns:
         return
     
-    # For each audit message event, find the first query that followed it
-    # in the same conversation
+    # Ensure timestamps are parsed
+    metrics_df["request_started_at"] = pd.to_datetime(metrics_df["request_started_at"])
+    history_df["start_time"] = pd.to_datetime(history_df["start_time"])
+    
     overhead_count = 0
     
     for idx, row in metrics_df.iterrows():
@@ -552,16 +486,12 @@ def enrich_metrics_with_query_history(
     access_audit_table: Optional[str] = None,
     output_path: Optional[str] = None,
     time_buffer_minutes: int = 30,
-    # Deprecated: use query_history_table instead
-    system_catalog: Optional[str] = None,
 ) -> pd.DataFrame:
     """
     Enrich detailed_metrics.csv with SQL execution metrics and AI overhead.
     
-    This function:
-    1. Queries query history table for SQL execution metrics
-    2. Queries audit table for AI overhead (message -> query timing)
-    3. Adds bottleneck classification and speed categorization
+    Looks up query history by statement_id (captured at runtime from GenieResponse),
+    then adds bottleneck classification and speed categorization.
     
     Should be run after the load test completes AND after waiting for the
     system tables to be updated (typically 15-30 minutes).
@@ -574,8 +504,7 @@ def enrich_metrics_with_query_history(
         access_audit_table: Fully-qualified access audit table path
             (default: from SYSTEM_ACCESS_AUDIT_TABLE env var or system.access.audit).
         output_path: Optional output path (default: overwrites input file).
-        time_buffer_minutes: Extra time buffer around test window (default: 30).
-        system_catalog: Deprecated. Use query_history_table/access_audit_table instead.
+        time_buffer_minutes: Extra time buffer around test window for audit events (default: 30).
         
     Returns:
         Enriched DataFrame with SQL execution metrics.
@@ -585,11 +514,6 @@ def enrich_metrics_with_query_history(
         warehouse_id = os.environ.get("GENIE_WAREHOUSE_ID", "")
     if not warehouse_id:
         raise ValueError("warehouse_id is required (or set GENIE_WAREHOUSE_ID env var)")
-    
-    # Handle deprecated system_catalog parameter for backward compatibility
-    if system_catalog is not None and query_history_table is None and access_audit_table is None:
-        query_history_table = f"{system_catalog}.query.history"
-        access_audit_table = f"{system_catalog}.access.audit"
     
     if query_history_table is None:
         query_history_table = _get_query_history_table()
@@ -611,37 +535,39 @@ def enrich_metrics_with_query_history(
             print(f"  Already has {enriched_count} enriched rows")
             return metrics_df
     
-    # Get time range
-    metrics_df["request_started_at"] = pd.to_datetime(metrics_df["request_started_at"])
-    metrics_df["request_completed_at"] = pd.to_datetime(metrics_df["request_completed_at"])
-    
-    start_time = metrics_df["request_started_at"].min() - timedelta(minutes=time_buffer_minutes)
-    end_time = metrics_df["request_completed_at"].max() + timedelta(minutes=time_buffer_minutes)
-    
-    print(f"  Time range: {start_time} to {end_time}")
-    
-    # Count rows with SQL
-    sql_count = metrics_df["sql"].notna().sum()
-    print(f"  Rows with SQL: {sql_count}")
-    
-    if sql_count == 0:
-        print("  No SQL queries to enrich")
+    # Count rows with statement_ids
+    if "sql_statement_id" not in metrics_df.columns:
+        print("  No sql_statement_id column found -- nothing to enrich")
         return metrics_df
     
-    # Fetch query history
-    print(f"Fetching query history from {query_history_table}...")
-    history_df = get_query_history_for_timerange(
+    stmt_id_count = metrics_df["sql_statement_id"].notna().sum()
+    print(f"  Rows with statement_id: {stmt_id_count}")
+    
+    if stmt_id_count == 0:
+        print("  No statement_ids to look up")
+        return metrics_df
+    
+    # Fetch query history by statement_ids
+    known_ids = metrics_df["sql_statement_id"].dropna().unique().tolist()
+    print(f"Fetching query history for {len(known_ids)} statement_ids from {query_history_table}...")
+    history_df = get_query_history_by_statement_ids(
         warehouse_id=warehouse_id,
-        start_time=start_time,
-        end_time=end_time,
+        statement_ids=known_ids,
         query_history_table=query_history_table,
     )
-    print(f"  Found {len(history_df)} query history entries")
+    print(f"  Found {len(history_df)} entries")
     
     if history_df.empty:
         print("  No query history found. The data may not be available yet.")
         print("  System tables typically have 15-30 minute ingestion delay.")
         return metrics_df
+    
+    # Get time range for audit event lookup
+    metrics_df["request_started_at"] = pd.to_datetime(metrics_df["request_started_at"])
+    metrics_df["request_completed_at"] = pd.to_datetime(metrics_df["request_completed_at"])
+    
+    start_time = metrics_df["request_started_at"].min() - timedelta(minutes=time_buffer_minutes)
+    end_time = metrics_df["request_completed_at"].max() + timedelta(minutes=time_buffer_minutes)
     
     # Fetch audit events for AI overhead
     audit_df = pd.DataFrame()
@@ -661,33 +587,33 @@ def enrich_metrics_with_query_history(
             print(f"  Warning: Could not fetch audit events: {e}")
             print("  AI overhead will not be calculated.")
     else:
-        print("  No space_id found in metrics - skipping audit event lookup")
+        print("  No space_id found in metrics -- skipping audit event lookup")
     
-    # Match and enrich
-    print("Matching queries...")
-    enriched_df = match_queries(metrics_df, history_df, audit_df=audit_df)
+    # Enrich via merge on statement_id
+    print("Enriching metrics...")
+    enriched_df = enrich_with_query_history(metrics_df, history_df, audit_df=audit_df)
     
     # Save
     print(f"Saving enriched metrics to: {output_path}")
     enriched_df.to_csv(output_path, index=False)
     
     # Summary
+    sql_count = metrics_df["sql"].notna().sum() if "sql" in metrics_df.columns else stmt_id_count
     enriched_count = enriched_df["sql_total_duration_ms"].notna().sum()
     print(f"\nEnrichment complete:")
     print(f"  Total rows: {len(enriched_df)}")
     print(f"  Enriched rows: {enriched_count}")
-    print(f"  Enrichment rate: {enriched_count/sql_count*100:.1f}% of SQL queries")
+    if sql_count > 0:
+        print(f"  Enrichment rate: {enriched_count / sql_count * 100:.1f}% of SQL queries")
     
     if enriched_count > 0:
-        # Show data source summary
         print(f"\nData Sources:")
-        print(f"  {query_history_table} -> SQL execution metrics:")
+        print(f"  {query_history_table} -> SQL execution metrics (by statement_id):")
         print(f"    sql_total_duration_ms, sql_execution_time_ms, sql_compilation_time_ms")
         print(f"    sql_queue_wait_ms, sql_compute_wait_ms, sql_result_fetch_ms")
         print(f"    sql_rows_produced, sql_bytes_read, sql_rows_read")
         print(f"    sql_error_message, sql_warehouse_id")
         
-        # AI overhead summary
         if "ai_overhead_ms" in enriched_df.columns:
             overhead_count = enriched_df["ai_overhead_ms"].notna().sum()
             if overhead_count > 0:
@@ -695,7 +621,6 @@ def enrich_metrics_with_query_history(
                 print(f"  {access_audit_table} -> AI overhead:")
                 print(f"    ai_overhead_ms: {overhead_count} rows, avg {avg_overhead:.0f}ms")
         
-        # Bottleneck summary
         if "sql_bottleneck" in enriched_df.columns:
             bottleneck_counts = enriched_df["sql_bottleneck"].value_counts()
             print(f"\n  Bottleneck Distribution:")
@@ -711,8 +636,6 @@ def enrich_results_directory(
     warehouse_id: Optional[str] = None,
     query_history_table: Optional[str] = None,
     access_audit_table: Optional[str] = None,
-    # Deprecated: use query_history_table/access_audit_table instead
-    system_catalog: Optional[str] = None,
 ) -> Optional[pd.DataFrame]:
     """
     Enrich the detailed_metrics.csv file in a results directory.
@@ -724,7 +647,6 @@ def enrich_results_directory(
         warehouse_id: SQL warehouse ID (optional, uses env var).
         query_history_table: Fully-qualified query history table path (optional, uses env var).
         access_audit_table: Fully-qualified access audit table path (optional, uses env var).
-        system_catalog: Deprecated. Use query_history_table/access_audit_table instead.
         
     Returns:
         Enriched DataFrame, or None if file not found.
@@ -740,5 +662,4 @@ def enrich_results_directory(
         warehouse_id=warehouse_id,
         query_history_table=query_history_table,
         access_audit_table=access_audit_table,
-        system_catalog=system_catalog,
     )
