@@ -356,6 +356,7 @@ class CachedGenieLoadTestUser(User):
                 genie_message_id=response.message_id if response else None,
                 message_index=i,
                 sql=response.query if response else None,
+                sql_statement_id=response.statement_id if response else None,
                 response_size=response_length,
                 success=exception is None,
                 error=str(exception) if exception else None,
