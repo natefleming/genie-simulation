@@ -26,6 +26,7 @@ dbutils.library.restartPython()
 import os
 from datetime import datetime
 from glob import glob
+from importlib.metadata import version
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -39,6 +40,8 @@ from scipy import stats
 # Try multiple paths since CWD varies between local and Databricks environments
 load_dotenv("../.env")
 load_dotenv(".env")
+
+print(f"dao-ai version: {version('dao-ai')}")
 
 # COMMAND ----------
 

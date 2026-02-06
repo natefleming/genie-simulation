@@ -8,7 +8,7 @@ that can be exported to CSV for analysis and loading into Unity Catalog.
 import csv
 import os
 import threading
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Optional
 
@@ -36,50 +36,10 @@ class RequestMetric:
     response_size: int
     success: bool
     error: Optional[str]
-    # ---- Runtime + post-processing enrichment fields ----
-    #
-    # sql_statement_id is captured at runtime from GenieResponse.statement_id,
-    # enabling deterministic matching against system.query.history during
-    # post-processing enrichment (enrich_metrics.py). This eliminates the need
-    # for fuzzy SQL text matching or time-proximity heuristics.
-    #
-    # Remaining fields are populated by enrich_metrics.py after waiting for
-    # system table ingestion (15-30 min delay).
-    #
-    # From system.query.history (looked up by sql_statement_id):
-    #   - total_duration_ms -> sql_total_duration_ms
-    #   - execution_duration_ms -> sql_execution_time_ms
-    #   - compilation_duration_ms -> sql_compilation_time_ms
-    #   - waiting_at_capacity_duration_ms -> sql_queue_wait_ms
-    #   - waiting_for_compute_duration_ms -> sql_compute_wait_ms
-    #   - result_fetch_duration_ms -> sql_result_fetch_ms
-    #   - produced_rows -> sql_rows_produced
-    #   - read_bytes -> sql_bytes_read
-    #   - read_rows -> sql_rows_read
-    #   - error_message -> sql_error_message
-    #   - compute.warehouse_id -> sql_warehouse_id
-    #
-    # From system.access.audit (correlated with query history):
-    #   - ai_overhead_ms: Time from message event to first SQL query start
-    #
-    # Derived metrics:
-    #   - sql_bottleneck: Classification (COMPUTE_STARTUP, QUEUE_WAIT, etc.)
-    #   - sql_speed_category: Speed bucket (FAST, MODERATE, SLOW, CRITICAL)
-    sql_statement_id: Optional[str] = None  # Statement ID captured from GenieResponse
-    sql_total_duration_ms: Optional[float] = None  # Total time query spent in warehouse
-    sql_execution_time_ms: Optional[float] = None  # Time spent executing SQL in warehouse
-    sql_compilation_time_ms: Optional[float] = None  # Time spent compiling/planning SQL
-    sql_queue_wait_ms: Optional[float] = None  # Time waiting in queue at capacity
-    sql_compute_wait_ms: Optional[float] = None  # Time waiting for compute resources
-    sql_result_fetch_ms: Optional[float] = None  # Time fetching results
-    sql_rows_produced: Optional[int] = None  # Number of rows returned by query
-    sql_bytes_read: Optional[int] = None  # Bytes read during execution
-    sql_rows_read: Optional[int] = None  # Rows scanned (not returned) - scan efficiency
-    sql_error_message: Optional[str] = None  # Error message if query failed
-    sql_warehouse_id: Optional[str] = None  # Which warehouse ran the query
-    ai_overhead_ms: Optional[float] = None  # AI inference time (message -> first SQL)
-    sql_bottleneck: Optional[str] = None  # Bottleneck classification
-    sql_speed_category: Optional[str] = None  # Speed bucket (FAST/MODERATE/SLOW/CRITICAL)
+    # Captured at runtime from GenieResponse.statement_id.
+    # Used by enrich_metrics.py to look up SQL execution metrics from
+    # system.query.history after system table ingestion (15-30 min delay).
+    sql_statement_id: Optional[str] = None
 
 
 class DetailedMetricsCollector:
@@ -166,20 +126,11 @@ class DetailedMetricsCollector:
             with open(path, "w", newline="") as f:
                 writer = csv.writer(f)
                 writer.writerow([
-                    # Core metrics from load test
                     "run_id", "space_id", "request_started_at", "request_completed_at", "duration_ms",
                     "concurrent_users", "user", "prompt", "source_conversation_id",
                     "source_message_id", "genie_conversation_id", "genie_message_id",
                     "message_index", "sql", "response_size", "success", "error",
-                    # SQL execution metrics from system.query.history (post-processing)
-                    "sql_statement_id", "sql_total_duration_ms", "sql_execution_time_ms",
-                    "sql_compilation_time_ms", "sql_queue_wait_ms", "sql_compute_wait_ms",
-                    "sql_result_fetch_ms", "sql_rows_produced", "sql_bytes_read",
-                    "sql_rows_read", "sql_error_message", "sql_warehouse_id",
-                    # AI overhead from system.access.audit (post-processing)
-                    "ai_overhead_ms",
-                    # Derived metrics (post-processing)
-                    "sql_bottleneck", "sql_speed_category"
+                    "sql_statement_id",
                 ])
             return 0
         

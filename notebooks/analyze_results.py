@@ -36,6 +36,7 @@ dbutils.library.restartPython()
 
 import os
 from glob import glob
+from importlib.metadata import version
 from pathlib import Path
 from typing import Optional
 
@@ -46,6 +47,8 @@ from dotenv import load_dotenv
 # Try multiple paths since CWD varies between local and Databricks environments
 load_dotenv("../.env")
 load_dotenv(".env")
+
+print(f"dao-ai version: {version('dao-ai')}")
 
 # COMMAND ----------
 
