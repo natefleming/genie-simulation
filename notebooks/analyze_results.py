@@ -1738,6 +1738,219 @@ else:
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## SQL Runtime vs Concurrency
+# MAGIC
+# MAGIC **What it shows:** How SQL execution metrics from `system.query.history` change as concurrent
+# MAGIC users increase within a single test run. This isolates warehouse-level performance from
+# MAGIC end-to-end latency to reveal whether the SQL warehouse or the AI/Genie layer is the
+# MAGIC bottleneck under load.
+# MAGIC
+# MAGIC **Why it matters:**
+# MAGIC - **Queue Wait Growth**: Rising queue wait times indicate the warehouse is at capacity
+# MAGIC - **Execution Time Stability**: If SQL execution time stays flat but E2E grows, the AI layer is the bottleneck
+# MAGIC - **Bottleneck Shift Detection**: At low concurrency SQL may dominate; at high concurrency, AI overhead or queue wait may take over
+# MAGIC
+# MAGIC **Key insights to look for:**
+# MAGIC - **SQL P50 degradation**: Does median SQL time grow with users?
+# MAGIC - **Queue wait scaling**: Flat = warehouse capacity OK, growing = need to scale warehouse
+# MAGIC - **SQL % of total**: Increasing = SQL is bottleneck; decreasing = AI/network is bottleneck
+
+# COMMAND ----------
+
+# Check if SQL execution metrics AND multiple concurrency levels are available
+_has_sql_concurrency = (
+    not detailed_metrics_df.empty
+    and 'sql_total_duration_ms' in detailed_metrics_df.columns
+    and detailed_metrics_df['sql_total_duration_ms'].notna().any()
+    and 'concurrent_users' in detailed_metrics_df.columns
+    and detailed_metrics_df['concurrent_users'].nunique() > 1
+)
+
+if _has_sql_concurrency:
+    _sql_conc_df = detailed_metrics_df[detailed_metrics_df['sql_total_duration_ms'].notna()].copy()
+    _conc_levels = sorted(_sql_conc_df['concurrent_users'].unique())
+
+    # ── Printed table: SQL metrics percentiles by concurrent users ──
+    print("=" * 100)
+    print("SQL RUNTIME PERCENTILES BY CONCURRENT USERS")
+    print("=" * 100)
+
+    _sql_metric_cols = {
+        'sql_total_duration_ms': 'SQL Total',
+        'sql_execution_time_ms': 'Execution',
+        'sql_queue_wait_ms': 'Queue Wait',
+        'sql_compilation_time_ms': 'Compilation',
+        'sql_compute_wait_ms': 'Compute Wait',
+    }
+    _available_sql_metric_cols = {k: v for k, v in _sql_metric_cols.items() if k in _sql_conc_df.columns}
+
+    for col_key, col_label in _available_sql_metric_cols.items():
+        print(f"\n  {col_label} (seconds)")
+        print(f"  {'Users':<10} {'P50':>10} {'P90':>10} {'P95':>10} {'P99':>10} {'Mean':>10}")
+        print("  " + "-" * 60)
+        for u in _conc_levels:
+            vals = _sql_conc_df[_sql_conc_df['concurrent_users'] == u][col_key] / 1000
+            print(f"  {u:<10} {vals.quantile(0.50):>10.2f} {vals.quantile(0.90):>10.2f} "
+                  f"{vals.quantile(0.95):>10.2f} {vals.quantile(0.99):>10.2f} {vals.mean():>10.2f}")
+
+    # ── Figure: SQL Runtime Scaling (2x2) ──
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+
+    # 1. SQL Total Time Percentiles vs Concurrent Users (line chart)
+    ax1 = axes[0, 0]
+    _sql_pct_data: dict[str, list[float]] = {'P50': [], 'P90': [], 'P95': [], 'P99': []}
+    for u in _conc_levels:
+        vals = _sql_conc_df[_sql_conc_df['concurrent_users'] == u]['sql_total_duration_ms'] / 1000
+        _sql_pct_data['P50'].append(vals.quantile(0.50))
+        _sql_pct_data['P90'].append(vals.quantile(0.90))
+        _sql_pct_data['P95'].append(vals.quantile(0.95))
+        _sql_pct_data['P99'].append(vals.quantile(0.99))
+
+    ax1.plot(_conc_levels, _sql_pct_data['P50'], marker='o', linewidth=2, markersize=8, label='P50', color='blue')
+    ax1.plot(_conc_levels, _sql_pct_data['P90'], marker='s', linewidth=2, markersize=6, label='P90', color='orange')
+    ax1.plot(_conc_levels, _sql_pct_data['P95'], marker='^', linewidth=2, markersize=6, label='P95', color='red')
+    ax1.plot(_conc_levels, _sql_pct_data['P99'], marker='d', linewidth=2, markersize=6, label='P99', color='darkred')
+    if len(_conc_levels) > 1:
+        z = np.polyfit(_conc_levels, _sql_pct_data['P50'], 1)
+        p = np.poly1d(z)
+        ax1.plot(_conc_levels, p(_conc_levels), 'b--', alpha=0.5, label=f'P50 Trend: {z[0]:.3f}s/user')
+    ax1.set_xlabel('Concurrent Users')
+    ax1.set_ylabel('SQL Total Time (seconds)')
+    ax1.set_title('SQL Total Time Percentiles vs Concurrent Users')
+    ax1.legend(loc='upper left')
+    ax1.grid(True, alpha=0.3)
+    ax1.set_xticks(_conc_levels)
+
+    # 2. SQL Time Breakdown Stacked Bar by Concurrency
+    ax2 = axes[0, 1]
+    _breakdown_cols = {
+        'sql_execution_time_ms': 'Execution',
+        'sql_compilation_time_ms': 'Compilation',
+        'sql_queue_wait_ms': 'Queue Wait',
+        'sql_compute_wait_ms': 'Compute Wait',
+        'sql_result_fetch_ms': 'Result Fetch',
+    }
+    _avail_breakdown = {k: v for k, v in _breakdown_cols.items() if k in _sql_conc_df.columns}
+    _bottom = np.zeros(len(_conc_levels))
+    _stack_colors = ['#2ecc71', '#3498db', '#f39c12', '#9b59b6', '#1abc9c']
+    for i, (col_key, col_label) in enumerate(_avail_breakdown.items()):
+        means = [_sql_conc_df[_sql_conc_df['concurrent_users'] == u][col_key].mean() / 1000 for u in _conc_levels]
+        means_clean = [v if not np.isnan(v) else 0 for v in means]
+        ax2.bar([str(u) for u in _conc_levels], means_clean, bottom=_bottom,
+                label=col_label, color=_stack_colors[i % len(_stack_colors)], edgecolor='black', alpha=0.8)
+        _bottom += np.array(means_clean)
+    ax2.set_xlabel('Concurrent Users')
+    ax2.set_ylabel('Time (seconds)')
+    ax2.set_title('SQL Time Breakdown by Concurrency')
+    ax2.legend(loc='upper left', fontsize=8)
+    ax2.grid(True, alpha=0.3, axis='y')
+
+    # 3. SQL Queue Wait Scaling (line chart with P50/P90/P99)
+    ax3 = axes[1, 0]
+    if 'sql_queue_wait_ms' in _sql_conc_df.columns:
+        _qw_pct: dict[str, list[float]] = {'P50': [], 'P90': [], 'P99': []}
+        for u in _conc_levels:
+            vals = _sql_conc_df[_sql_conc_df['concurrent_users'] == u]['sql_queue_wait_ms'] / 1000
+            _qw_pct['P50'].append(vals.quantile(0.50))
+            _qw_pct['P90'].append(vals.quantile(0.90))
+            _qw_pct['P99'].append(vals.quantile(0.99))
+        ax3.plot(_conc_levels, _qw_pct['P50'], marker='o', linewidth=2, markersize=8, label='P50', color='blue')
+        ax3.plot(_conc_levels, _qw_pct['P90'], marker='s', linewidth=2, markersize=6, label='P90', color='orange')
+        ax3.plot(_conc_levels, _qw_pct['P99'], marker='d', linewidth=2, markersize=6, label='P99', color='darkred')
+        ax3.set_xlabel('Concurrent Users')
+        ax3.set_ylabel('Queue Wait (seconds)')
+        ax3.set_title('SQL Queue Wait Scaling')
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+        ax3.set_xticks(_conc_levels)
+    else:
+        ax3.text(0.5, 0.5, 'No queue wait data available', ha='center', va='center', transform=ax3.transAxes)
+        ax3.set_title('SQL Queue Wait Scaling')
+
+    # 4. SQL % of Total Latency by Concurrency
+    ax4 = axes[1, 1]
+    _sql_pct_of_total: dict[str, list[float]] = {'Mean': [], 'Median': []}
+    for u in _conc_levels:
+        user_df = _sql_conc_df[_sql_conc_df['concurrent_users'] == u]
+        ratio = (user_df['sql_total_duration_ms'] / user_df['duration_ms']) * 100
+        _sql_pct_of_total['Mean'].append(ratio.mean())
+        _sql_pct_of_total['Median'].append(ratio.median())
+    ax4.plot(_conc_levels, _sql_pct_of_total['Mean'], marker='o', linewidth=2, markersize=8,
+             label='Mean', color='purple')
+    ax4.plot(_conc_levels, _sql_pct_of_total['Median'], marker='s', linewidth=2, markersize=6,
+             label='Median', color='teal')
+    ax4.axhline(50, color='gray', linestyle='--', alpha=0.5, label='50% line')
+    ax4.set_xlabel('Concurrent Users')
+    ax4.set_ylabel('SQL Time as % of Total Latency')
+    ax4.set_title('SQL Share of End-to-End Latency by Concurrency')
+    ax4.legend()
+    ax4.grid(True, alpha=0.3)
+    ax4.set_xticks(_conc_levels)
+    ax4.set_ylim([0, max(max(_sql_pct_of_total['Mean']), max(_sql_pct_of_total['Median'])) * 1.15])
+
+    plt.tight_layout()
+    fig.savefig(images_dir / "sql_runtime_vs_concurrency.png", dpi=150, bbox_inches='tight')
+    print(f"\nSaved: {images_dir / 'sql_runtime_vs_concurrency.png'}")
+    plt.show()
+
+    # ── Key Insights ──
+    print("\n" + "=" * 70)
+    print("SQL RUNTIME SCALING INSIGHTS")
+    print("=" * 70)
+
+    # SQL P50 degradation
+    _min_u = _conc_levels[0]
+    _max_u = _conc_levels[-1]
+    _baseline_sql_p50 = _sql_pct_data['P50'][0]
+    _max_load_sql_p50 = _sql_pct_data['P50'][-1]
+    _sql_p50_degradation = ((_max_load_sql_p50 - _baseline_sql_p50) / _baseline_sql_p50) * 100 if _baseline_sql_p50 > 0 else 0
+
+    print(f"\nSQL Total Time P50: {_baseline_sql_p50:.2f}s ({_min_u} users) -> {_max_load_sql_p50:.2f}s ({_max_u} users)  ({_sql_p50_degradation:+.1f}%)")
+    if _sql_p50_degradation < 25:
+        print("  ✓ SQL execution scales well - warehouse handles concurrency efficiently")
+    elif _sql_p50_degradation < 75:
+        print("  ⚡ Moderate SQL degradation under load - monitor warehouse utilization")
+    else:
+        print("  ⚠️  Significant SQL degradation - consider scaling warehouse or optimizing queries")
+
+    # Queue wait scaling
+    if 'sql_queue_wait_ms' in _sql_conc_df.columns:
+        _baseline_qw = _qw_pct['P50'][0]
+        _max_qw = _qw_pct['P50'][-1]
+        _qw_growth = _max_qw - _baseline_qw
+        print(f"\nQueue Wait P50: {_baseline_qw:.2f}s ({_min_u} users) -> {_max_qw:.2f}s ({_max_u} users)  (+{_qw_growth:.2f}s)")
+        if _qw_growth < 0.5:
+            print("  ✓ Queue wait is flat - warehouse has spare capacity")
+        elif _qw_growth < 2.0:
+            print("  ⚡ Queue wait is growing - warehouse approaching capacity")
+        else:
+            print("  ⚠️  Queue wait grows significantly - warehouse is a bottleneck, scale up")
+
+    # Bottleneck shift detection
+    _baseline_sql_pct = _sql_pct_of_total['Mean'][0]
+    _max_load_sql_pct = _sql_pct_of_total['Mean'][-1]
+    _pct_shift = _max_load_sql_pct - _baseline_sql_pct
+
+    print(f"\nSQL Share of Total Latency: {_baseline_sql_pct:.1f}% ({_min_u} users) -> {_max_load_sql_pct:.1f}% ({_max_u} users)")
+    if _pct_shift > 10:
+        print("  ⚠️  SQL share is INCREASING under load - warehouse is the growing bottleneck")
+        print("     Recommendation: Scale warehouse, optimize slow queries, or add indexes")
+    elif _pct_shift < -10:
+        print("  ⚠️  SQL share is DECREASING under load - AI/Genie overhead is the growing bottleneck")
+        print("     Recommendation: Investigate Genie API latency and network overhead")
+    else:
+        print("  ✓ Bottleneck profile is stable across concurrency levels")
+
+elif not detailed_metrics_df.empty and 'sql_total_duration_ms' in detailed_metrics_df.columns:
+    print("SQL Runtime vs Concurrency analysis requires multiple concurrency levels")
+    print("Run tests with different user counts to enable this analysis")
+else:
+    print("No SQL execution metrics available for concurrency analysis")
+    print("Run enrichment with a warehouse ID to populate SQL metrics from system.query.history")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Concurrency Impact Analysis
 # MAGIC
 # MAGIC **What it shows:** How Genie's performance changes as the number of concurrent users increases.

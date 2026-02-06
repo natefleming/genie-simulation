@@ -965,6 +965,267 @@ else:
 # COMMAND ----------
 
 # MAGIC %md
+# MAGIC ## SQL Runtime Scaling Analysis
+# MAGIC
+# MAGIC **What it shows:** How SQL execution metrics scale as concurrent users increase across runs.
+# MAGIC Includes scaling curves, degradation factors, queue wait growth, and bottleneck shift analysis
+# MAGIC to determine whether the SQL warehouse or the AI/Genie layer becomes the limiting factor.
+# MAGIC
+# MAGIC **Key insights:**
+# MAGIC - **SQL Scaling Curves**: P50/P90/P95/P99 for SQL total time vs concurrent users
+# MAGIC - **Queue Wait Growth**: Whether the warehouse is reaching capacity under load
+# MAGIC - **Bottleneck Shift**: Does the SQL share of total latency increase or decrease with users?
+# MAGIC - **Degradation Factor**: How much SQL performance degrades relative to baseline
+
+# COMMAND ----------
+
+# Check if SQL metrics and multiple concurrency levels are available
+_has_sql_scaling = (
+    has_sql_metrics
+    and len(sql_df['concurrent_users'].unique()) > 1
+)
+
+if _has_sql_scaling:
+    _sql_scale_df = sql_df.copy()
+    _scale_levels = sorted(_sql_scale_df['concurrent_users'].unique())
+
+    # ── Figure: SQL Runtime Scaling Curves (2x3) ──
+    fig, axes = plt.subplots(2, 3, figsize=(20, 12))
+
+    # 1. SQL Total Time Percentile Lines
+    ax1 = axes[0, 0]
+    _sql_pct: dict[str, list[float]] = {'P50': [], 'P90': [], 'P95': [], 'P99': []}
+    for u in _scale_levels:
+        vals = _sql_scale_df[_sql_scale_df['concurrent_users'] == u]['sql_total_duration_ms'] / 1000
+        _sql_pct['P50'].append(vals.quantile(0.50))
+        _sql_pct['P90'].append(vals.quantile(0.90))
+        _sql_pct['P95'].append(vals.quantile(0.95))
+        _sql_pct['P99'].append(vals.quantile(0.99))
+
+    ax1.plot(_scale_levels, _sql_pct['P50'], marker='o', linewidth=2, markersize=8, label='P50', color='blue')
+    ax1.plot(_scale_levels, _sql_pct['P90'], marker='s', linewidth=2, markersize=6, label='P90', color='orange')
+    ax1.plot(_scale_levels, _sql_pct['P95'], marker='^', linewidth=2, markersize=6, label='P95', color='red')
+    ax1.plot(_scale_levels, _sql_pct['P99'], marker='d', linewidth=2, markersize=6, label='P99', color='darkred')
+    if len(_scale_levels) > 1:
+        z = np.polyfit(_scale_levels, _sql_pct['P50'], 1)
+        p_fit = np.poly1d(z)
+        ax1.plot(_scale_levels, p_fit(_scale_levels), 'b--', alpha=0.5, label=f'P50 Trend: {z[0]:.3f}s/user')
+    ax1.set_xlabel('Concurrent Users', fontsize=12)
+    ax1.set_ylabel('SQL Total Time (seconds)', fontsize=12)
+    ax1.set_title('SQL Total Time Percentiles vs Concurrent Users', fontsize=13)
+    ax1.legend(loc='upper left')
+    ax1.grid(True, alpha=0.3)
+    ax1.set_xticks(_scale_levels)
+
+    # 2. SQL Queue Wait Percentile Lines
+    ax2 = axes[0, 1]
+    if 'sql_queue_wait_ms' in _sql_scale_df.columns:
+        _qw: dict[str, list[float]] = {'P50': [], 'P90': [], 'P99': []}
+        for u in _scale_levels:
+            vals = _sql_scale_df[_sql_scale_df['concurrent_users'] == u]['sql_queue_wait_ms'] / 1000
+            _qw['P50'].append(vals.quantile(0.50))
+            _qw['P90'].append(vals.quantile(0.90))
+            _qw['P99'].append(vals.quantile(0.99))
+        ax2.plot(_scale_levels, _qw['P50'], marker='o', linewidth=2, markersize=8, label='P50', color='blue')
+        ax2.plot(_scale_levels, _qw['P90'], marker='s', linewidth=2, markersize=6, label='P90', color='orange')
+        ax2.plot(_scale_levels, _qw['P99'], marker='d', linewidth=2, markersize=6, label='P99', color='darkred')
+        ax2.set_xlabel('Concurrent Users', fontsize=12)
+        ax2.set_ylabel('Queue Wait (seconds)', fontsize=12)
+        ax2.set_title('SQL Queue Wait Scaling', fontsize=13)
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        ax2.set_xticks(_scale_levels)
+    else:
+        ax2.text(0.5, 0.5, 'No queue wait data available', ha='center', va='center', transform=ax2.transAxes)
+        ax2.set_title('SQL Queue Wait Scaling', fontsize=13)
+
+    # 3. SQL Time as % of E2E by Concurrency
+    ax3 = axes[0, 2]
+    _sql_share_mean: list[float] = []
+    _sql_share_median: list[float] = []
+    for u in _scale_levels:
+        user_df = _sql_scale_df[_sql_scale_df['concurrent_users'] == u]
+        ratio = (user_df['sql_total_duration_ms'] / user_df['duration_ms']) * 100
+        _sql_share_mean.append(ratio.mean())
+        _sql_share_median.append(ratio.median())
+    ax3.plot(_scale_levels, _sql_share_mean, marker='o', linewidth=2, markersize=8, label='Mean', color='purple')
+    ax3.plot(_scale_levels, _sql_share_median, marker='s', linewidth=2, markersize=6, label='Median', color='teal')
+    ax3.axhline(50, color='gray', linestyle='--', alpha=0.5, label='50% line')
+    ax3.set_xlabel('Concurrent Users', fontsize=12)
+    ax3.set_ylabel('SQL % of Total Latency', fontsize=12)
+    ax3.set_title('SQL Share of E2E Latency by Concurrency', fontsize=13)
+    ax3.legend()
+    ax3.grid(True, alpha=0.3)
+    ax3.set_xticks(_scale_levels)
+    ax3.set_ylim([0, max(max(_sql_share_mean), max(_sql_share_median)) * 1.15])
+
+    # 4. SQL Execution Time CDF by Concurrency
+    ax4 = axes[1, 0]
+    for u in _scale_levels:
+        vals = _sql_scale_df[_sql_scale_df['concurrent_users'] == u]['sql_total_duration_ms'] / 1000
+        sorted_vals = np.sort(vals)
+        cdf = np.arange(1, len(sorted_vals) + 1) / len(sorted_vals)
+        ax4.plot(sorted_vals, cdf * 100, label=f'{u} users', linewidth=2, alpha=0.8)
+    ax4.set_xlabel('SQL Total Time (seconds)', fontsize=12)
+    ax4.set_ylabel('Cumulative % of Requests', fontsize=12)
+    ax4.set_title('SQL Total Time CDF by Concurrency', fontsize=13)
+    ax4.legend(loc='lower right')
+    ax4.grid(True, alpha=0.3)
+    ax4.axhline(50, color='gray', linestyle='--', alpha=0.3)
+    ax4.axhline(95, color='orange', linestyle='--', alpha=0.3)
+    ax4.axhline(99, color='red', linestyle='--', alpha=0.3)
+
+    # 5. SQL Degradation Factor (normalized SQL P50 vs baseline)
+    ax5 = axes[1, 1]
+    if _sql_pct['P50'][0] > 0:
+        _sql_degradation = [v / _sql_pct['P50'][0] for v in _sql_pct['P50']]
+        ax5.plot(_scale_levels, _sql_degradation, marker='o', linewidth=2, markersize=8, color='purple')
+        ax5.axhline(1.0, color='gray', linestyle='--', alpha=0.5, label='Baseline (1x)')
+        ax5.axhline(2.0, color='orange', linestyle='--', alpha=0.5, label='2x degradation')
+        ax5.axhline(3.0, color='red', linestyle='--', alpha=0.5, label='3x degradation')
+        ax5.set_xlabel('Concurrent Users', fontsize=12)
+        ax5.set_ylabel('SQL P50 Degradation Factor', fontsize=12)
+        ax5.set_title('SQL Performance Degradation vs Baseline', fontsize=13)
+        ax5.legend()
+        ax5.grid(True, alpha=0.3)
+        ax5.set_xticks(_scale_levels)
+    else:
+        ax5.text(0.5, 0.5, 'Baseline SQL P50 is zero', ha='center', va='center', transform=ax5.transAxes)
+        ax5.set_title('SQL Performance Degradation vs Baseline', fontsize=13)
+
+    # 6. SQL vs AI Overhead Stacked Area
+    ax6 = axes[1, 2]
+    _mean_sql: list[float] = []
+    _mean_ai: list[float] = []
+    _mean_other: list[float] = []
+    _has_ai = 'ai_overhead_ms' in _sql_scale_df.columns and _sql_scale_df['ai_overhead_ms'].notna().any()
+    for u in _scale_levels:
+        user_df = _sql_scale_df[_sql_scale_df['concurrent_users'] == u]
+        avg_e2e = user_df['duration_ms'].mean() / 1000
+        avg_sql = user_df['sql_total_duration_ms'].mean() / 1000
+        _mean_sql.append(avg_sql)
+        if _has_ai:
+            ai_subset = user_df[user_df['ai_overhead_ms'].notna()]
+            avg_ai = ai_subset['ai_overhead_ms'].mean() / 1000 if len(ai_subset) > 0 else 0
+        else:
+            avg_ai = 0
+        _mean_ai.append(avg_ai)
+        _mean_other.append(max(0, avg_e2e - avg_sql - avg_ai))
+    ax6.bar([str(u) for u in _scale_levels], _mean_sql, label='SQL Warehouse', color='#2ecc71', edgecolor='black', alpha=0.8)
+    ax6.bar([str(u) for u in _scale_levels], _mean_ai, bottom=_mean_sql, label='AI Overhead', color='#e74c3c', edgecolor='black', alpha=0.8)
+    _bottom_other = [s + a for s, a in zip(_mean_sql, _mean_ai)]
+    ax6.bar([str(u) for u in _scale_levels], _mean_other, bottom=_bottom_other, label='Other (network, etc.)', color='#95a5a6', edgecolor='black', alpha=0.8)
+    ax6.set_xlabel('Concurrent Users', fontsize=12)
+    ax6.set_ylabel('Time (seconds)', fontsize=12)
+    ax6.set_title('E2E Time Breakdown: SQL vs AI vs Other', fontsize=13)
+    ax6.legend(loc='upper left', fontsize=8)
+    ax6.grid(True, alpha=0.3, axis='y')
+
+    plt.tight_layout()
+    fig.savefig(images_dir / "sql_runtime_scaling_curves.png", dpi=150, bbox_inches='tight')
+    print(f"\nSaved: {images_dir / 'sql_runtime_scaling_curves.png'}")
+    plt.show()
+
+    # ── Printed Summary & Recommendations ──
+    print("\n" + "=" * 80)
+    print("SQL RUNTIME SCALING SUMMARY")
+    print("=" * 80)
+
+    _min_u = _scale_levels[0]
+    _max_u = _scale_levels[-1]
+
+    # SQL P50 degradation
+    _baseline_sql_p50 = _sql_pct['P50'][0]
+    _max_load_sql_p50 = _sql_pct['P50'][-1]
+    _sql_p50_deg = ((_max_load_sql_p50 - _baseline_sql_p50) / _baseline_sql_p50) * 100 if _baseline_sql_p50 > 0 else 0
+    print(f"\n  SQL Total Time P50: {_baseline_sql_p50:.2f}s ({_min_u} users) -> {_max_load_sql_p50:.2f}s ({_max_u} users)  ({_sql_p50_deg:+.1f}%)")
+
+    # Queue wait growth
+    if 'sql_queue_wait_ms' in _sql_scale_df.columns:
+        _qw_baseline = _qw['P50'][0]
+        _qw_max = _qw['P50'][-1]
+        _qw_growth = _qw_max - _qw_baseline
+        print(f"  Queue Wait P50: {_qw_baseline:.2f}s -> {_qw_max:.2f}s  (+{_qw_growth:.2f}s)")
+
+    # Correlation
+    _corr_data = _sql_scale_df[['concurrent_users', 'sql_total_duration_ms']].dropna()
+    if len(_corr_data) > 2:
+        corr_val = _corr_data['concurrent_users'].corr(_corr_data['sql_total_duration_ms'])
+        print(f"  Correlation (concurrent_users vs sql_total_duration_ms): r={corr_val:.3f}")
+
+    # Bottleneck shift
+    _baseline_share = _sql_share_mean[0]
+    _max_share = _sql_share_mean[-1]
+    _share_shift = _max_share - _baseline_share
+    print(f"  SQL Share of E2E: {_baseline_share:.1f}% -> {_max_share:.1f}%  ({_share_shift:+.1f}pp)")
+
+    # Per-level assessment
+    print(f"\n  {'Users':<10} {'Bottleneck Profile':<30}")
+    print("  " + "-" * 40)
+    for i, u in enumerate(_scale_levels):
+        share = _sql_share_mean[i]
+        if 'sql_queue_wait_ms' in _sql_scale_df.columns:
+            qw_mean = _sql_scale_df[_sql_scale_df['concurrent_users'] == u]['sql_queue_wait_ms'].mean() / 1000
+        else:
+            qw_mean = 0
+        if qw_mean > 2.0:
+            profile = "QUEUE-BOUND (scale warehouse)"
+        elif share > 65:
+            profile = "SQL-BOUND (optimize queries)"
+        elif share < 35:
+            profile = "AI-BOUND (Genie overhead)"
+        else:
+            profile = "BALANCED"
+        print(f"  {u:<10} {profile:<30} (SQL: {share:.0f}%, QW: {qw_mean:.1f}s)")
+
+    # Recommendations
+    print(f"\n  RECOMMENDATIONS:")
+    if _sql_p50_deg > 75:
+        print("  - SQL performance degrades significantly under load")
+        print("    Consider: larger warehouse, query optimization, or caching")
+    if 'sql_queue_wait_ms' in _sql_scale_df.columns and _qw_growth > 1.0:
+        print("  - Queue wait is growing: warehouse is reaching capacity")
+        print("    Consider: scaling warehouse clusters, using serverless, or reducing concurrency")
+    if _share_shift > 10:
+        print("  - SQL share of total latency is growing: warehouse is the scaling bottleneck")
+    elif _share_shift < -10:
+        print("  - AI overhead is growing faster than SQL: Genie API is the scaling bottleneck")
+    if _sql_p50_deg < 25 and (not ('sql_queue_wait_ms' in _sql_scale_df.columns) or _qw_growth < 0.5):
+        print("  - SQL warehouse scales well across tested concurrency levels")
+
+    # ── SQL comparison summary CSV ──
+    _sql_summary_rows = []
+    for i, u in enumerate(_scale_levels):
+        row: dict = {'concurrent_users': u}
+        row['sql_total_p50_s'] = _sql_pct['P50'][i]
+        row['sql_total_p90_s'] = _sql_pct['P90'][i]
+        row['sql_total_p95_s'] = _sql_pct['P95'][i]
+        row['sql_total_p99_s'] = _sql_pct['P99'][i]
+        row['sql_share_of_e2e_pct'] = _sql_share_mean[i]
+        row['mean_sql_s'] = _mean_sql[i]
+        row['mean_ai_overhead_s'] = _mean_ai[i]
+        row['mean_other_s'] = _mean_other[i]
+        if 'sql_queue_wait_ms' in _sql_scale_df.columns:
+            row['queue_wait_p50_s'] = _qw['P50'][i]
+            row['queue_wait_p90_s'] = _qw['P90'][i]
+            row['queue_wait_p99_s'] = _qw['P99'][i]
+        _sql_summary_rows.append(row)
+    _sql_summary_df = pd.DataFrame(_sql_summary_rows)
+    _sql_summary_path = comparison_dir / "sql_comparison_summary.csv"
+    _sql_summary_df.to_csv(_sql_summary_path, index=False)
+    print(f"\n  Saved SQL comparison summary: {_sql_summary_path}")
+
+    print(f"\n✓ SQL runtime scaling analysis complete")
+else:
+    if has_sql_metrics:
+        print("SQL Runtime Scaling analysis requires multiple concurrency levels")
+        print("Run tests with different user counts to enable this analysis")
+    else:
+        print("No SQL execution metrics available for scaling analysis")
+
+# COMMAND ----------
+
+# MAGIC %md
 # MAGIC ## Export Data
 
 # COMMAND ----------
