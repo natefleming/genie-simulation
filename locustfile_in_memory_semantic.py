@@ -49,7 +49,7 @@ import mlflow
 import yaml
 from dao_ai.config import (
     GenieLRUCacheParametersModel,
-    GenieInMemorySemanticCacheParametersModel,
+    GenieInMemoryContextAwareCacheParametersModel,
     WarehouseModel,
 )
 from dao_ai.genie import GenieService, GenieServiceBase
@@ -338,7 +338,7 @@ class InMemorySemanticCachedGenieUser(User):
         warehouse = WarehouseModel(warehouse_id=WAREHOUSE_ID)
         
         # Wrap with in-memory semantic cache
-        in_memory_semantic_cache_params = GenieInMemorySemanticCacheParametersModel(
+        in_memory_semantic_cache_params = GenieInMemoryContextAwareCacheParametersModel(
             warehouse=warehouse,
             embedding_model=EMBEDDING_MODEL,
             time_to_live_seconds=CACHE_TTL,

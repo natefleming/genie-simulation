@@ -26,7 +26,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install pandas matplotlib python-dotenv --quiet --upgrade
+# MAGIC %pip install pandas "matplotlib>=3.10" python-dotenv --quiet --upgrade
 
 # COMMAND ----------
 
@@ -36,7 +36,6 @@ dbutils.library.restartPython()
 
 import os
 from glob import glob
-from importlib.metadata import version
 from pathlib import Path
 from typing import Optional
 
@@ -47,8 +46,6 @@ from dotenv import load_dotenv
 # Try multiple paths since CWD varies between local and Databricks environments
 load_dotenv("../.env")
 load_dotenv(".env")
-
-print(f"dao-ai version: {version('dao-ai')}")
 
 # COMMAND ----------
 
@@ -850,7 +847,7 @@ if not detailed_metrics_df.empty and 'message_index' in detailed_metrics_df.colu
     positions_to_plot = sorted(detailed_metrics_df['message_index'].unique())[:10]  # Limit to first 10 positions
     data_for_box = [detailed_metrics_df[detailed_metrics_df['message_index'] == pos]['duration_ms'] / 1000
                     for pos in positions_to_plot]
-    ax2.boxplot(data_for_box, labels=positions_to_plot)
+    ax2.boxplot(data_for_box, tick_labels=positions_to_plot)
     ax2.set_xlabel('Message Position in Conversation')
     ax2.set_ylabel('Response Time (seconds)')
     ax2.set_title('Latency Distribution by Message Position')
@@ -1130,7 +1127,7 @@ if not detailed_metrics_df.empty and 'sql' in detailed_metrics_df.columns:
         complexity_plot_data = [sql_df[sql_df['complexity_category'] == cat]['duration_ms'] / 1000
                                for cat in category_order if cat in sql_df['complexity_category'].values]
         complexity_labels = [cat for cat in category_order if cat in sql_df['complexity_category'].values]
-        ax2.boxplot(complexity_plot_data, labels=complexity_labels)
+        ax2.boxplot(complexity_plot_data, tick_labels=complexity_labels)
         ax2.set_xlabel('Complexity Category')
         ax2.set_ylabel('Response Time (seconds)')
         ax2.set_title('Latency by SQL Complexity')
@@ -1951,7 +1948,7 @@ if not detailed_metrics_df.empty and 'concurrent_users' in detailed_metrics_df.c
     concurrent_user_levels = sorted(detailed_metrics_df['concurrent_users'].unique())
     box_data = [detailed_metrics_df[detailed_metrics_df['concurrent_users'] == level]['duration_ms'] / 1000
                 for level in concurrent_user_levels]
-    ax2.boxplot(box_data, labels=concurrent_user_levels)
+    ax2.boxplot(box_data, tick_labels=concurrent_user_levels)
     ax2.set_xlabel('Concurrent Users')
     ax2.set_ylabel('Response Time (seconds)')
     ax2.set_title('Latency Distribution by Concurrent Users')

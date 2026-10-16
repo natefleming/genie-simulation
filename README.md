@@ -18,7 +18,7 @@ This is useful for understanding if your Genie setup can handle many users befor
 
 You'll need:
 
-1. **Python 3.11 or newer** installed on your computer
+1. **Python 3.12 or newer** installed on your computer
 2. **Access to a Databricks workspace** with a Genie space set up
 3. **Your Genie Space ID** (a long string of letters and numbers that identifies your Genie)
 
@@ -206,6 +206,8 @@ Load tests can be run directly from Databricks notebooks, which is useful for te
 ### Setup
 
 1. **Upload the project** to your Databricks workspace (e.g., `/Workspace/Users/you@company.com/genie-simulation/`)
+
+   Notebooks require Python 3.12. On serverless, set **Environment version 4** (or newer) in the notebook's Environment side panel, or on the job task; the default environment uses an older Python and the `%pip install` step will fail. On classic compute, use Databricks Runtime 16.0 or newer.
 
 2. **Create a `.env` file** in the project root with your configuration:
 
