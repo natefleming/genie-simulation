@@ -26,7 +26,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install pandas matplotlib python-dotenv --quiet --upgrade
+# MAGIC %pip install pandas "matplotlib>=3.10" python-dotenv --quiet --upgrade
 
 # COMMAND ----------
 

@@ -15,7 +15,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install pandas matplotlib seaborn scipy python-dotenv --quiet --upgrade
+# MAGIC %pip install pandas "matplotlib>=3.10" seaborn scipy python-dotenv --quiet --upgrade
 
 # COMMAND ----------
 
@@ -108,7 +108,7 @@ default_dirs = ", ".join(available_dirs)
 dbutils.widgets.text("results_dirs", default_dirs, "Results Directories (comma-separated, results/ prefix optional)")
 dbutils.widgets.text("space_id_filter", "", "Filter by Space ID (leave blank for all)")
 
-# Widget for SQL warehouse ID (used for enrichment with query.history and access.audit)
+# Widget for SQL warehouse ID (used for enrichment with query.history)
 default_warehouse_id = os.environ.get("GENIE_WAREHOUSE_ID", "")
 dbutils.widgets.text("warehouse_id", default_warehouse_id, "SQL Warehouse ID (for enrichment)")
 
@@ -788,7 +788,6 @@ if 'concurrent_users' in available_cols and 'duration_ms' in available_cols:
 # MAGIC
 # MAGIC **Data sources:**
 # MAGIC - `system.query.history`: SQL execution, compilation, queue, compute wait times
-# MAGIC - `system.access.audit`: AI overhead (NL-to-SQL inference time)
 
 # COMMAND ----------
 

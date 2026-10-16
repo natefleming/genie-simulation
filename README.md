@@ -207,7 +207,7 @@ Load tests can be run directly from Databricks notebooks, which is useful for te
 
 1. **Upload the project** to your Databricks workspace (e.g., `/Workspace/Users/you@company.com/genie-simulation/`)
 
-   Notebooks require Python 3.12. On serverless, set **Environment version 4** (or newer) in the notebook's Environment side panel, or on the job task; the default environment uses an older Python and the `%pip install` step will fail.
+   Notebooks require Python 3.12. On serverless, set **Environment version 4** (or newer) in the notebook's Environment side panel, or on the job task; the default environment uses an older Python and the `%pip install` step will fail. On classic compute, use Databricks Runtime 16.0 or newer.
 
 2. **Create a `.env` file** in the project root with your configuration:
 

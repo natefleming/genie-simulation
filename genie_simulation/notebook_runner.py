@@ -38,12 +38,19 @@ def _subprocess_env() -> dict[str, str]:
 
     psycopg-binary 3.3.x bundles a FIPS-patched libcrypto 1.1.1k that aborts with
     "FATAL FIPS SELFTEST FAILURE" on Databricks serverless as soon as dao_ai is
-    imported. When a system libpq is available, use psycopg's pure-Python
-    implementation instead, which links against it.
+    imported. On Databricks, when a system libpq is available, use psycopg's
+    pure-Python implementation instead, which links against it.
     """
     env = os.environ.copy()
-    if ctypes.util.find_library("pq"):
-        env.setdefault("PSYCOPG_IMPL", "python")
+    if "DATABRICKS_RUNTIME_VERSION" in env and "PSYCOPG_IMPL" not in env:
+        if ctypes.util.find_library("pq"):
+            env["PSYCOPG_IMPL"] = "python"
+        else:
+            print(
+                "Warning: no system libpq found; leaving psycopg-binary in use. If the "
+                "load test exits with code -6 (FATAL FIPS SELFTEST FAILURE), install "
+                "libpq or set PSYCOPG_IMPL=python."
+            )
     return env
 
 
