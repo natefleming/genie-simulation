@@ -284,3 +284,6 @@ deploy/
 
 # Load test results directory
 results/
+
+# Isaac local state
+.isaac/
