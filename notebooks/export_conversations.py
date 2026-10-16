@@ -245,7 +245,7 @@ def export_conversations(
                         messages.append({
                             "content": content,
                             "timestamp": msg.created_timestamp,
-                            "message_id": msg.id,
+                            "message_id": msg.message_id,
                         })
 
                 if msg_response.next_page_token:

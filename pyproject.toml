@@ -3,12 +3,12 @@ name = "genie-simulation"
 version = "0.1.0"
 description = "Tools for exporting Genie conversations and load testing Genie chatbot interactions"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 dependencies = [
-    "dao-ai>=0.1.22",
-    "databricks-ai-bridge>=0.6.0",
-    "databricks-sdk>=0.81.0",
-    "locust>=2.29.0",
+    "dao-ai>=0.2.21",
+    "databricks-ai-bridge>=0.22.0",
+    "databricks-sdk>=0.153.0",
+    "locust>=2.46.7",
     "loguru>=0.7.0",
     "python-dotenv>=1.0.0",
     "pyyaml>=6.0",

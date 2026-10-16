@@ -20,6 +20,7 @@ Usage:
 
 from __future__ import annotations
 
+import ctypes.util
 import os
 import shlex
 import subprocess
@@ -29,6 +30,21 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
+
+
+def _subprocess_env() -> dict[str, str]:
+    """
+    Build the environment for the Locust subprocess.
+
+    psycopg-binary 3.3.x bundles a FIPS-patched libcrypto 1.1.1k that aborts with
+    "FATAL FIPS SELFTEST FAILURE" on Databricks serverless as soon as dao_ai is
+    imported. When a system libpq is available, use psycopg's pure-Python
+    implementation instead, which links against it.
+    """
+    env = os.environ.copy()
+    if ctypes.util.find_library("pq"):
+        env.setdefault("PSYCOPG_IMPL", "python")
+    return env
 
 
 def generate_results_dir(base_prefix: str, space_id: str, user_count: int, run_time: str) -> str:
@@ -137,7 +153,7 @@ def run_load_test(
         raise FileNotFoundError(f"Locustfile not found: {locustfile_path}")
     
     # Set environment variables for the locustfile
-    env = os.environ.copy()
+    env = _subprocess_env()
     env["GENIE_SPACE_ID"] = space_id
     env["GENIE_CONVERSATIONS_FILE"] = str(conversations_path)
     env["GENIE_MIN_WAIT"] = str(min_wait)
@@ -342,7 +358,7 @@ def run_cached_load_test(
         raise FileNotFoundError(f"Locustfile not found: {locustfile_path}")
     
     # Set environment variables for the locustfile
-    env = os.environ.copy()
+    env = _subprocess_env()
     env["GENIE_SPACE_ID"] = space_id
     env["GENIE_CONVERSATIONS_FILE"] = str(conversations_path)
     env["GENIE_MIN_WAIT"] = str(min_wait)
@@ -509,7 +525,7 @@ def run_in_memory_semantic_load_test(
         raise FileNotFoundError(f"Locustfile not found: {locustfile_path}")
     
     # Set environment variables for the locustfile
-    env = os.environ.copy()
+    env = _subprocess_env()
     env["GENIE_SPACE_ID"] = space_id
     env["GENIE_CONVERSATIONS_FILE"] = str(conversations_path)
     env["GENIE_MIN_WAIT"] = str(min_wait)

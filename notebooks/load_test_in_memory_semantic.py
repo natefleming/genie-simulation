@@ -72,6 +72,10 @@ print(f"  Duration: {run_time}")
 
 # COMMAND ----------
 
+import sys
+
+sys.path.insert(0, "..")  # Add parent directory to path for genie_simulation module
+
 from genie_simulation.config import load_config, LoadTestConfig, InMemoryCacheConfig
 
 # Load environment variables from .env

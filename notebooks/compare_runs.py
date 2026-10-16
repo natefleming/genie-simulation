@@ -26,7 +26,6 @@ dbutils.library.restartPython()
 import os
 from datetime import datetime
 from glob import glob
-from importlib.metadata import version
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -40,8 +39,6 @@ from scipy import stats
 # Try multiple paths since CWD varies between local and Databricks environments
 load_dotenv("../.env")
 load_dotenv(".env")
-
-print(f"dao-ai version: {version('dao-ai')}")
 
 # COMMAND ----------
 
@@ -115,11 +112,9 @@ dbutils.widgets.text("space_id_filter", "", "Filter by Space ID (leave blank for
 default_warehouse_id = os.environ.get("GENIE_WAREHOUSE_ID", "")
 dbutils.widgets.text("warehouse_id", default_warehouse_id, "SQL Warehouse ID (for enrichment)")
 
-# Widgets for system table paths (fully-qualified: catalog.schema.table)
+# Widget for system table path (fully-qualified: catalog.schema.table)
 default_query_history_table = os.environ.get("SYSTEM_QUERY_HISTORY_TABLE", "system.query.history")
-default_access_audit_table = os.environ.get("SYSTEM_ACCESS_AUDIT_TABLE", "system.access.audit")
 dbutils.widgets.text("query_history_table", default_query_history_table, "Query History Table")
-dbutils.widgets.text("access_audit_table", default_access_audit_table, "Access Audit Table")
 
 # COMMAND ----------
 
@@ -248,7 +243,6 @@ print(f"Concurrent user levels: {sorted(combined_df['concurrent_users'].unique()
 # Enrich each directory's metrics if needed
 warehouse_id = dbutils.widgets.get("warehouse_id").strip() or os.environ.get("GENIE_WAREHOUSE_ID", "")
 query_history_table = dbutils.widgets.get("query_history_table").strip() or os.environ.get("SYSTEM_QUERY_HISTORY_TABLE", "system.query.history")
-access_audit_table = dbutils.widgets.get("access_audit_table").strip() or os.environ.get("SYSTEM_ACCESS_AUDIT_TABLE", "system.access.audit")
 
 if warehouse_id:
     import sys
@@ -270,7 +264,6 @@ if warehouse_id:
                     results_dir=dir_path,
                     warehouse_id=warehouse_id,
                     query_history_table=query_history_table,
-                    access_audit_table=access_audit_table,
                 )
                 any_enriched = True
             except Exception as e:
@@ -691,7 +684,7 @@ ax3.grid(True, alpha=0.3, axis='x')
 ax4 = axes[1, 1]
 run_order = run_stats.index.tolist()
 box_data = [combined_df[combined_df['run_id'] == run]['duration_ms'] / 1000 for run in run_order]
-ax4.boxplot(box_data, vert=False)
+ax4.boxplot(box_data, orientation="horizontal")
 ax4.set_yticklabels([f"{r[:25]}..." if len(r) > 25 else r for r in run_order], fontsize=8)
 ax4.set_xlabel('Response Time (seconds)', fontsize=10)
 ax4.set_title('Latency Distribution by Run', fontsize=12)
